@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: project skeleton only.
+Status: stages 0-1 done (build setup, SDL3 window, Vec2/Rot/Mat2/Transform with tests).
 
 ## Layout
 
@@ -16,4 +16,13 @@ Status: project skeleton only.
 engine/   static library "phys" (no graphics dependency)
 demo/     SDL3 debug renderer and scenes
 tests/    dependency-free test runner
+```
+
+## Build
+
+```bash
+cmake --preset debug          # Ninja, ASan + UBSan
+cmake --build --preset debug
+ctest --preset debug
+./build/debug/demo/demo       # needs SDL3 (brew install sdl3)
 ```
