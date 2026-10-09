@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-6 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence).
+Status: stages 0-7 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence, broad phase).
 
 ## Layout
 
@@ -16,6 +16,7 @@ Status: stages 0-6 done (build setup, 2D math, integrators + fixed timestep, rig
 engine/   static library "phys" (no graphics dependency)
 demo/     SDL3 debug renderer and scenes
 tests/    dependency-free test runner
+bench/    broad phase / World::step timings (build the release preset)
 ```
 
 ## Build
@@ -120,8 +121,6 @@ speed is `e` times closing speed; a dropped ball leaves at `e` times its arrival
 `mu > tan t`; a sliding disc settles into rolling at exactly 2/3 of its initial speed with `w = -v/r`.
 A tower of four crates stands, and a single solver sweep demonstrably does not hold it.
 
-Known limitations after this stage (addressed later): the broad phase is still all pairs (Stage 7).
-
 Demo: click to drop shapes; `M` switches rubber / wood / ice; drop things on the ramps.
 
 ## Stage 6: warm starting and contact persistence
@@ -159,3 +158,54 @@ Both settings are in `SolverSettings` (`warm_starting`, `iterations`). In the de
 Not done yet (Stage 9): bodies never sleep, so a settled pile is still simulated every step. Overlap
 is still corrected by Baumgarte velocity bias, which adds a little energy; a separate position solve
 could remove that.
+
+## Stage 7: broad phase
+
+The narrow phase is exact but costs real work per pair, and testing every pair is O(n^2). The broad
+phase compares cheap AABBs (`aabb.hpp`) first and hands the narrow phase only the survivors. There are
+three interchangeable implementations in `broadphase.hpp`, selected by `World::broadphase`:
+
+- **Brute force**: every pair. The reference the others are tested against.
+- **Sweep and prune**: bodies kept sorted by the left edge of their box on x. Body i can only overlap
+  the following bodies whose left edge is no further right than i's right edge, so the scan stops
+  early. The order persists between frames and insertion sort fixes it up in near-linear time (it falls
+  back to a full sort after a teleport or a burst of new bodies).
+- **Dynamic AABB tree** (`dynamic_tree.hpp`, the default): a balanced binary tree whose leaves are
+  bodies' boxes padded by 10 cm and whose interior nodes enclose their children. Inserting walks down
+  choosing the child that grows the total perimeter least; AVL-style rotations keep the height near
+  log2(n) (1000 boxes inserted in sorted order give height 10, not 999). A body only touches the tree
+  when its real box escapes its padding, so most steps cost one containment test per body. Each moving
+  body then queries the tree for overlaps.
+
+Two things hold for all three, and are tested: **pairs come out sorted by (a, b)**, so the narrow phase
+sees the same pairs in the same order whichever runs, and a stepped scene is bit-for-bit identical
+across broad phases; and **pairs of two immovable bodies are never reported**.
+
+**Collision filtering**: each body has a `category` and a `mask`; two bodies collide only if each one's
+mask admits the other's category (`should_collide`). The filter runs after the broad phase, before the
+narrow phase. In the demo, ghost mode (`G`) makes shapes pass through each other but still hit the floor.
+
+Benchmark (`phys_bench`, release build, Apple clang, ms per frame; boxes jitter a little every frame):
+
+| bodies | brute force | sweep and prune | tree |
+|---|---|---|---|
+| 1000 scattered | 2.03 | 0.12 | 0.25 |
+| 5000 scattered | 23.6 | 0.60 | 3.30 |
+| 10000 scattered | (skipped) | 1.55 | 10.2 |
+| 5000 in a tall column | 8.24 | 24.4 | 0.42 |
+| 10000 in a tall column | (skipped) | 121.8 | 0.94 |
+
+What this says, honestly: both beat brute force by a wide margin. Brute force quadruples its work
+when bodies double; sweep and prune and the tree need about 2.3x-2.8x as many comparisons per doubling
+(work growing like n^1.2 to n^1.5). On evenly scattered bodies sweep and prune is the fastest, 2x-7x
+quicker than the tree depending on size. But sweep and prune sorts on
+one axis, so when many boxes share an x range (a tall stack, a wide floor) it compares nearly every
+pair and ends up slower than brute force: 130x slower than the tree on a 10000-box column. The tree
+has no such pathological case, which is why it is the default. Whole `World::step` with 2000 crates:
+brute force 3.7 ms, sweep and prune 0.33 ms, tree 1.5 ms. The tree's query cost per body also grows
+faster than log n here (about 60 node visits per body at 2000 bodies, 160 at 10000), so there is room
+to improve its quality (for example a periodic bulk rebuild); not done.
+
+Demo: `F` rains 100 shapes (up to 1500 bodies), `B` switches broad phase, `T` draws the tree's boxes
+(or each body's tight box in the other modes), and the readout shows box tests, candidate pairs and
+confirmed contacts for the last step.

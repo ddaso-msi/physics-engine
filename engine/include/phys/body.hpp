@@ -6,6 +6,8 @@
 #include "math.hpp"
 #include "shapes.hpp"
 
+#include <cstdint>
+
 namespace phys {
 
 enum class BodyType { Static, Dynamic };
@@ -32,6 +34,12 @@ struct Body {
     Real restitution = static_cast<Real>(0.2);  // 0 = no bounce, 1 = perfectly elastic
     Real friction = static_cast<Real>(0.5);     // Coulomb coefficient
 
+    // Collision filtering. `category` says which group(s) this body belongs to, `mask` which groups
+    // it is willing to collide with. Two bodies collide only if EACH one's mask admits the other's
+    // category, so a one-sided mask cannot make a body push another that cannot push back.
+    std::uint16_t category = 0x0001;
+    std::uint16_t mask = 0xFFFF;
+
     Body() = default;
     Body(const Shape& shape, Vec2 position, Real angle, BodyType type = BodyType::Dynamic,
          Real density = 1);
@@ -57,5 +65,9 @@ struct Body {
     // Both halves back to back, for bodies that are not in a contact-solving world.
     void integrate(Real dt, Vec2 gravity);
 };
+
+inline bool should_collide(const Body& a, const Body& b) {
+    return (a.mask & b.category) != 0 && (b.mask & a.category) != 0;
+}
 
 }  // namespace phys

@@ -9,12 +9,19 @@
 //   1 box   2 circle   3 hexagon   4 triangle     M cycle material (rubber / wood / ice)
 //   W warm starting on/off    - / =  fewer / more solver sweeps     C show contacts
 //   P pyramid level    R default level    X clear dynamic bodies    Esc quit
+//
+// Broad phase (stage 7):
+//   F  rain 100 random shapes from the top (up to 1500 bodies; watch the box-test count)
+//   B  cycle broad phase: tree / sweep and prune / brute force
+//   T  draw boxes: the tree's padded boxes (tree mode) or each body's tight box (other modes)
+//   G  ghost mode: new shapes ignore other ghosts (collision filtering) but still hit everything else
 #include <SDL3/SDL.h>
 #include <phys/timestep.hpp>
 #include <phys/world.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 using namespace phys;
@@ -25,7 +32,7 @@ constexpr int kWidth = 960, kHeight = 640;
 constexpr float kPixelsPerMeter = 60.0f;
 constexpr float kWorldW = static_cast<float>(kWidth) / kPixelsPerMeter;
 constexpr float kWorldH = static_cast<float>(kHeight) / kPixelsPerMeter;
-constexpr size_t kMaxBodies = 160;  // the narrow phase is O(n^2) until stage 7
+constexpr size_t kMaxBodies = 1500;  // the solver and broad phase handle this; a debug build gets slow
 
 SDL_FPoint to_screen(Vec2 w) { return {w.x * kPixelsPerMeter, (kWorldH - w.y) * kPixelsPerMeter}; }
 Vec2 to_world(float sx, float sy) { return {sx / kPixelsPerMeter, kWorldH - sy / kPixelsPerMeter}; }
@@ -105,6 +112,12 @@ void build_level(World& world, size_t& static_count, bool pyramid) {
     world.add(make_body(Kind::Circle, {2.6f, 8.5f}, 0, kMaterials[0]));
 }
 
+void draw_aabb(SDL_Renderer* ren, const AABB& box) {
+    const SDL_FPoint lo = to_screen(box.lo), hi = to_screen(box.hi);  // y is flipped: lo.y is the bottom
+    const SDL_FRect r{lo.x, hi.y, hi.x - lo.x, lo.y - hi.y};
+    SDL_RenderRect(ren, &r);
+}
+
 void draw_body(SDL_Renderer* ren, const Body& b, SDL_Color color) {
     SDL_SetRenderDrawColor(ren, color.r, color.g, color.b, 255);
     if (b.shape.type == Shape::Type::Circle) {
@@ -149,6 +162,9 @@ int main() {
     Kind kind = Kind::Box;
     size_t material = 1;
     bool show_contacts = true;
+    bool show_boxes = false;
+    bool ghost_mode = false;
+    std::uint32_t rain_seed = 1;
     int spawned = 0;
 
     FixedTimestep timestep(1.0f / 120.0f);
@@ -173,6 +189,26 @@ int main() {
                     case SDLK_W: world.solver.warm_starting = !world.solver.warm_starting; break;
                     case SDLK_MINUS: world.solver.iterations = std::max(1, world.solver.iterations - 1); break;
                     case SDLK_EQUALS: world.solver.iterations = std::min(20, world.solver.iterations + 1); break;
+                    case SDLK_T: show_boxes = !show_boxes; break;
+                    case SDLK_G: ghost_mode = !ghost_mode; break;
+                    case SDLK_B:
+                        world.broadphase = world.broadphase == BroadphaseKind::DynamicTree      ? BroadphaseKind::SweepAndPrune
+                                           : world.broadphase == BroadphaseKind::SweepAndPrune ? BroadphaseKind::BruteForce
+                                                                                                : BroadphaseKind::DynamicTree;
+                        break;
+                    case SDLK_F:
+                        for (int i = 0; i < 100 && world.bodies.size() < kMaxBodies; ++i) {
+                            rain_seed = rain_seed * 1664525u + 1013904223u;
+                            const float rx = static_cast<float>(rain_seed >> 8) / static_cast<float>(1u << 24);
+                            rain_seed = rain_seed * 1664525u + 1013904223u;
+                            const float ry = static_cast<float>(rain_seed >> 8) / static_cast<float>(1u << 24);
+                            const Kind k = (i % 3 == 0) ? Kind::Circle : (i % 3 == 1) ? Kind::Box : Kind::Hexagon;
+                            Body b = make_body(k, {1.0f + rx * (kWorldW - 2.0f), 4.0f + ry * (kWorldH - 4.5f)},
+                                               rx * 6.0f, kMaterials[1]);
+                            b.restitution = 0.1f;
+                            world.add(b);
+                        }
+                        break;
                     default: break;
                 }
             }
@@ -180,7 +216,12 @@ int main() {
                 world.bodies.size() < kMaxBodies) {
                 // A small angle offset per spawn so stacked drops don't land perfectly aligned.
                 const Real tilt = 0.17f * static_cast<Real>(spawned++ % 5) - 0.3f;
-                world.add(make_body(kind, to_world(e.button.x, e.button.y), tilt, kMaterials[material]));
+                Body b = make_body(kind, to_world(e.button.x, e.button.y), tilt, kMaterials[material]);
+                if (ghost_mode) {  // group 2, collides only with group 1: not with other ghosts
+                    b.category = 0b10;
+                    b.mask = 0b01;
+                }
+                world.add(b);
             }
         }
 
@@ -192,7 +233,25 @@ int main() {
         SDL_SetRenderDrawColor(renderer, 20, 22, 28, 255);
         SDL_RenderClear(renderer);
         for (const Body& b : world.bodies)
-            draw_body(renderer, b, b.type == BodyType::Static ? SDL_Color{110, 114, 130, 255} : SDL_Color{120, 200, 255, 255});
+            draw_body(renderer, b,
+                      b.type == BodyType::Static ? SDL_Color{110, 114, 130, 255}
+                      : b.category == 0b10       ? SDL_Color{190, 150, 255, 255}  // ghost
+                                                 : SDL_Color{120, 200, 255, 255});
+
+        if (show_boxes) {
+            if (world.broadphase == BroadphaseKind::DynamicTree) {
+                // Leaves are the padded boxes bodies are stored under; interior nodes are the
+                // enclosing boxes, brighter the higher up the tree they are.
+                world.broadphase_tree().for_each_node([&](const AABB& box, int height, bool leaf) {
+                    if (leaf) SDL_SetRenderDrawColor(renderer, 90, 90, 40, 255);
+                    else SDL_SetRenderDrawColor(renderer, 40, static_cast<Uint8>(std::min(60 + 22 * height, 255)), 90, 255);
+                    draw_aabb(renderer, box);
+                });
+            } else {
+                SDL_SetRenderDrawColor(renderer, 90, 90, 40, 255);
+                for (const Body& b : world.bodies) draw_aabb(renderer, compute_aabb(b));
+            }
+        }
 
         if (show_contacts) {
             for (const ContactPair& c : world.contacts()) {
@@ -215,8 +274,16 @@ int main() {
                                   kind_name(kind), m.name, static_cast<double>(m.restitution),
                                   static_cast<double>(m.friction), static_cast<int>(world.bodies.size() - static_count),
                                   static_cast<int>(world.contacts().size()));
-        SDL_RenderDebugTextFormat(renderer, 70.0f, 44.0f, "warm starting: %s | solver sweeps: %d",
-                                  world.solver.warm_starting ? "on" : "OFF", world.solver.iterations);
+        SDL_RenderDebugTextFormat(renderer, 70.0f, 44.0f, "warm starting: %s | solver sweeps: %d | ghost mode: %s",
+                                  world.solver.warm_starting ? "on" : "OFF", world.solver.iterations,
+                                  ghost_mode ? "on" : "off");
+        const char* bp_name = world.broadphase == BroadphaseKind::DynamicTree      ? "tree"
+                              : world.broadphase == BroadphaseKind::SweepAndPrune ? "sweep and prune"
+                                                                                   : "brute force";
+        SDL_RenderDebugTextFormat(renderer, 70.0f, 60.0f, "broad phase: %s | %llu box tests -> %d candidate pairs -> %d contacts",
+                                  bp_name, static_cast<unsigned long long>(world.stats().broadphase_tests),
+                                  static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
+        SDL_RenderDebugText(renderer, 70.0f, 76.0f, "F rain 100 | B switch broad phase | T show boxes | G ghost mode");
         SDL_RenderPresent(renderer);
     }
 

@@ -15,11 +15,12 @@ if(PHYS_SANITIZE)
 endif()
 
 # Engine: pure library, no graphics dependency.
-add_library(phys STATIC engine/src/shapes.cpp engine/src/body.cpp engine/src/collision.cpp engine/src/solver.cpp engine/src/world.cpp)
+add_library(phys STATIC engine/src/shapes.cpp engine/src/body.cpp engine/src/collision.cpp engine/src/solver.cpp engine/src/dynamic_tree.cpp engine/src/broadphase.cpp engine/src/world.cpp)
 target_include_directories(phys PUBLIC engine/include)
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(bench)
 
 find_package(SDL3 CONFIG QUIET)
 if(SDL3_FOUND)
