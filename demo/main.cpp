@@ -3,14 +3,17 @@
 // Click to drop a shape at the cursor. Things to try:
 //   - drop a rubber ball and a wooden one: bounce height scales with restitution (e^2 per bounce)
 //   - drop a crate on a ramp, then switch to ice: friction decides if it slides or holds
-//   - stack crates: the solver's repeated sweeps are what keep the tower up
+//   - press P for a 28-crate pyramid, then W to turn warm starting off and watch it slump, or
+//     lower the solver sweeps with - and = while warm starting is on and see how little it needs
 //
 //   1 box   2 circle   3 hexagon   4 triangle     M cycle material (rubber / wood / ice)
-//   C show contacts    X clear dynamic bodies     R reset            Esc quit
+//   W warm starting on/off    - / =  fewer / more solver sweeps     C show contacts
+//   P pyramid level    R default level    X clear dynamic bodies    Esc quit
 #include <SDL3/SDL.h>
 #include <phys/timestep.hpp>
 #include <phys/world.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -76,13 +79,25 @@ Body make_static_box(Vec2 half, Vec2 pos, Real angle) {
     return b;
 }
 
-void build_level(World& world, size_t& static_count) {
-    world.bodies.clear();
+void build_level(World& world, size_t& static_count, bool pyramid) {
+    world.truncate(0);
     world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, 0.25f}, 0));            // floor
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {0.25f, kWorldH * 0.5f}, 0));            // left wall
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {kWorldW - 0.25f, kWorldH * 0.5f}, 0));  // right wall
-    world.add(make_static_box({2.8f, 0.15f}, {3.6f, 6.2f}, -0.3f));                             // ramp, slopes right
-    world.add(make_static_box({2.8f, 0.15f}, {11.6f, 4.4f}, 0.3f));                             // ramp, slopes left
+
+    if (pyramid) {
+        static_count = world.bodies.size();
+        constexpr int kBase = 7;  // 7 + 6 + ... + 1 = 28 crates
+        for (int row = 0; row < kBase; ++row)
+            for (int i = 0; i < kBase - row; ++i) {
+                const float x = kWorldW * 0.5f + (static_cast<float>(i) - static_cast<float>(kBase - row - 1) * 0.5f) * 1.02f;
+                world.add(make_body(Kind::Box, {x, 1.0f + static_cast<float>(row) * 1.002f}, 0, kMaterials[1]));
+            }
+        return;
+    }
+
+    world.add(make_static_box({2.8f, 0.15f}, {3.6f, 6.2f}, -0.3f));  // ramp, slopes right
+    world.add(make_static_box({2.8f, 0.15f}, {11.6f, 4.4f}, 0.3f));  // ramp, slopes left
     static_count = world.bodies.size();
 
     for (int i = 0; i < 4; ++i)  // a tower of crates
@@ -129,7 +144,7 @@ int main() {
 
     World world;
     size_t static_count = 0;
-    build_level(world, static_count);
+    build_level(world, static_count, false);
 
     Kind kind = Kind::Box;
     size_t material = 1;
@@ -152,8 +167,12 @@ int main() {
                     case SDLK_4: kind = Kind::Triangle; break;
                     case SDLK_M: material = (material + 1) % (sizeof(kMaterials) / sizeof(kMaterials[0])); break;
                     case SDLK_C: show_contacts = !show_contacts; break;
-                    case SDLK_X: world.bodies.resize(static_count); break;
-                    case SDLK_R: build_level(world, static_count); break;
+                    case SDLK_X: world.truncate(static_count); break;
+                    case SDLK_R: build_level(world, static_count, false); break;
+                    case SDLK_P: build_level(world, static_count, true); break;
+                    case SDLK_W: world.solver.warm_starting = !world.solver.warm_starting; break;
+                    case SDLK_MINUS: world.solver.iterations = std::max(1, world.solver.iterations - 1); break;
+                    case SDLK_EQUALS: world.solver.iterations = std::min(20, world.solver.iterations + 1); break;
                     default: break;
                 }
             }
@@ -190,12 +209,14 @@ int main() {
         }
 
         SDL_SetRenderDrawColor(renderer, 150, 154, 170, 255);
-        SDL_RenderDebugText(renderer, 70.0f, 12.0f, "click: drop shape | 1-4 shape | M material | C contacts | X clear | R reset");
+        SDL_RenderDebugText(renderer, 70.0f, 12.0f, "click drop | 1-4 shape | M material | W warm start | -/= sweeps | P pyramid | R reset | X clear");
         const Material& m = kMaterials[material];
         SDL_RenderDebugTextFormat(renderer, 70.0f, 28.0f, "%s, %s (e=%.2f, mu=%.2f) | bodies %d | contacts %d",
                                   kind_name(kind), m.name, static_cast<double>(m.restitution),
                                   static_cast<double>(m.friction), static_cast<int>(world.bodies.size() - static_count),
                                   static_cast<int>(world.contacts().size()));
+        SDL_RenderDebugTextFormat(renderer, 70.0f, 44.0f, "warm starting: %s | solver sweeps: %d",
+                                  world.solver.warm_starting ? "on" : "OFF", world.solver.iterations);
         SDL_RenderPresent(renderer);
     }
 

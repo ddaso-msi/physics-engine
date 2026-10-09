@@ -58,26 +58,32 @@ bool collide_polygon_circle(const Body& poly_body, const Body& circle_body, Mani
     const Vec2 v1 = p.vertices[face], v2 = p.vertices[(face + 1) % p.count];
     Vec2 n_local;
     Real s;  // signed distance from the polygon surface to the circle centre, along n_local
+    std::uint32_t id;  // the polygon feature touched: a face index, or kVertexFlag | vertex index
+    constexpr std::uint32_t kVertexFlag = 0x100;
     if (sep < std::numeric_limits<Real>::epsilon()) {
         // Centre is inside the polygon: push out through the nearest face.
         n_local = p.normals[face];
         s = sep;
+        id = static_cast<std::uint32_t>(face);
     } else if (dot(c - v1, v2 - v1) <= 0) {
         // Nearest feature is vertex v1.
         const Vec2 d = c - v1;
         s = d.length();
         if (s > r) return false;
         n_local = d.normalized();
+        id = kVertexFlag | static_cast<std::uint32_t>(face);
     } else if (dot(c - v2, v1 - v2) <= 0) {
         // Nearest feature is vertex v2.
         const Vec2 d = c - v2;
         s = d.length();
         if (s > r) return false;
         n_local = d.normalized();
+        id = kVertexFlag | static_cast<std::uint32_t>((face + 1) % p.count);
     } else {
         // Nearest feature is the face itself.
         n_local = p.normals[face];
         s = sep;
+        id = static_cast<std::uint32_t>(face);
     }
 
     const Vec2 n = rotate(poly_body.q, n_local);
@@ -85,7 +91,7 @@ bool collide_polygon_circle(const Body& poly_body, const Body& circle_body, Mani
     out.depth = r - s;
     out.count = 1;
     // Circle's deepest point is centre - n*r, the polygon surface is centre - n*s; take the midpoint.
-    out.points[0] = {circle_body.pos - n * ((r + s) * static_cast<Real>(0.5)), out.depth};
+    out.points[0] = {circle_body.pos - n * ((r + s) * static_cast<Real>(0.5)), out.depth, id};
     return true;
 }
 
@@ -126,16 +132,30 @@ Real find_max_separation(const WorldPolygon& a, const WorldPolygon& b, int& best
     return best;
 }
 
+// A point on the incident edge plus a tag naming where it came from: 0..7 is a vertex of the
+// incident polygon, kClipTag + ... is a point created by clipping against a side plane. The tag is
+// what lets us recognise "the same" contact point in the next frame.
+struct ClipVertex {
+    Vec2 p;
+    std::uint8_t tag = 0;
+};
+constexpr std::uint8_t kClipTag = 16;
+constexpr std::uint8_t kFallbackTag = 40;
+
 // Sutherland-Hodgman against one half-plane: keep the part of segment `in` where dot(n, p) <= c.
-// Returns how many points survive (0, 1 or 2).
-int clip_segment(Vec2 out[2], const Vec2 in[2], Vec2 n, Real c) {
+// `plane` (0 or 1) says which side plane this is, for tagging. Returns how many points survive.
+int clip_segment(ClipVertex out[2], const ClipVertex in[2], Vec2 n, Real c, int plane) {
     int count = 0;
-    const Real d0 = dot(n, in[0]) - c, d1 = dot(n, in[1]) - c;
+    const Real d0 = dot(n, in[0].p) - c, d1 = dot(n, in[1].p) - c;
     if (d0 <= 0) out[count++] = in[0];
     if (d1 <= 0) out[count++] = in[1];
     if (d0 * d1 < 0) {  // endpoints on opposite sides: add the crossing point
         const Real alpha = d0 / (d0 - d1);
-        out[count++] = in[0] + (in[1] - in[0]) * alpha;
+        ClipVertex v;
+        v.p = in[0].p + (in[1].p - in[0].p) * alpha;
+        // The crossing replaces whichever endpoint was cut off.
+        v.tag = static_cast<std::uint8_t>(kClipTag + 2 * plane + (d0 > 0 ? 0 : 1));
+        out[count++] = v;
     }
     return count;
 }
@@ -174,34 +194,45 @@ bool collide_polygons(const Body& a_body, const Body& b_body, Manifold& out) {
             inc_face = j;
         }
     }
-    const Vec2 incident[2] = {inc->v[inc_face], inc->v[(inc_face + 1) % inc->count]};
+    const ClipVertex incident[2] = {
+        {inc->v[inc_face], static_cast<std::uint8_t>(inc_face)},
+        {inc->v[(inc_face + 1) % inc->count], static_cast<std::uint8_t>((inc_face + 1) % inc->count)}};
 
     // Clip the incident edge to the "side planes" of the reference edge, so only the part that lies
     // over the reference face can produce contact points.
     const Vec2 v1 = ref->v[ref_face], v2 = ref->v[(ref_face + 1) % ref->count];
     const Vec2 t = (v2 - v1).normalized();
-    Vec2 clipped_a[2], clipped_b[2];
-    const bool clipped = clip_segment(clipped_a, incident, -t, -dot(t, v1)) == 2 &&
-                         clip_segment(clipped_b, clipped_a, t, dot(t, v2)) == 2;
+    ClipVertex clipped_a[2], clipped_b[2];
+    const bool clipped = clip_segment(clipped_a, incident, -t, -dot(t, v1), 0) == 2 &&
+                         clip_segment(clipped_b, clipped_a, t, dot(t, v2), 1) == 2;
+
+    // A point's id combines the two edges in contact with the tag of the point on the incident edge,
+    // so it changes only when a different pair of features touches.
+    auto make_id = [&](std::uint8_t tag) {
+        return (flipped ? 1u << 24 : 0u) | (static_cast<std::uint32_t>(ref_face) << 16) |
+               (static_cast<std::uint32_t>(inc_face) << 8) | tag;
+    };
 
     out.normal = flipped ? -ref_n : ref_n;  // always A -> B
     out.depth = -sep;
     out.count = 0;
     if (clipped) {
         for (int k = 0; k < 2; ++k) {
-            const Real s = dot(ref_n, clipped_b[k] - v1);  // <= 0 means behind the reference face
+            const Real s = dot(ref_n, clipped_b[k].p - v1);  // <= 0 means behind the reference face
             if (s <= 0)
-                out.points[out.count++] = {clipped_b[k] - ref_n * (s * static_cast<Real>(0.5)), -s};
+                out.points[out.count++] = {clipped_b[k].p - ref_n * (s * static_cast<Real>(0.5)), -s,
+                                           make_id(clipped_b[k].tag)};
         }
     }
     if (out.count == 0) {
         // The polygons overlap (SAT proved it) but the clipped edge never dips behind the reference
         // face; this happens when they just clip each other's corners. Report the deepest vertex of
         // the incident polygon so the pair is still pushed apart along the correct normal.
-        const Real s0 = dot(ref_n, incident[0] - v1), s1 = dot(ref_n, incident[1] - v1);
-        const Vec2 deepest = s1 < s0 ? incident[1] : incident[0];
+        const Real s0 = dot(ref_n, incident[0].p - v1), s1 = dot(ref_n, incident[1].p - v1);
+        const Vec2 deepest = s1 < s0 ? incident[1].p : incident[0].p;
         const Real s = std::min(std::min(s0, s1), Real(0));
-        out.points[out.count++] = {deepest - ref_n * (s * static_cast<Real>(0.5)), out.depth};
+        out.points[out.count++] = {deepest - ref_n * (s * static_cast<Real>(0.5)), out.depth,
+                                   make_id(kFallbackTag)};
     }
     return true;
 }

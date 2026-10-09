@@ -26,6 +26,11 @@ struct SolverSettings {
     // Closing speeds below this do not bounce (otherwise a body settling on the ground would
     // chatter forever on ever smaller bounces).
     Real restitution_threshold = 1;
+    // Start each step from last step's impulses (found by World via the contact point ids) instead
+    // of from zero. A resting contact needs nearly the same impulse every frame, so this begins the
+    // sweeps almost at the answer, and it lets a stack's weight propagate down over a few frames
+    // instead of needing many sweeps in a single one.
+    bool warm_starting = true;
 };
 
 // One colliding pair found by the narrow phase: indices into the world's body array.
@@ -36,7 +41,13 @@ struct ContactPair {
 
 // Changes the velocities of the bodies in `contacts` so none are moving into each other, bouncing
 // and applying friction as their materials dictate. `dt` converts overlap into a correcting speed.
-void solve_contacts(std::vector<Body>& bodies, const std::vector<ContactPair>& contacts, Real dt,
+// Reads each point's stored impulses (when warm starting) and writes the final ones back into it.
+void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt,
                     const SolverSettings& settings);
+
+// Copies solver impulses from last step's contacts to this step's, point by point: a point inherits
+// the impulses of the previous point with the same body pair and the same feature id. Points with no
+// match (a new touch) start from zero.
+void transfer_impulses(const std::vector<ContactPair>& previous, std::vector<ContactPair>& current);
 
 }  // namespace phys

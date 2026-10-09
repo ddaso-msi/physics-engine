@@ -10,11 +10,23 @@
 //   - each contact point sits halfway through the overlap, between the two surfaces.
 #include "body.hpp"
 
+#include <cstdint>
+
 namespace phys {
 
 struct ContactPoint {
     Vec2 point;   // world space
-    Real depth;   // penetration at this point, measured along the normal (>= 0)
+    Real depth = 0;   // penetration at this point, measured along the normal (>= 0)
+
+    // Names the geometric feature pair that produced this point (which edges / vertices). It stays
+    // the same from frame to frame while the same features touch, which is how a point is matched
+    // with its counterpart in the previous frame. Ids are only comparable within one body pair.
+    std::uint32_t id = 0;
+
+    // Solver state carried across frames (see World::step): the total impulse the solver applied at
+    // this point last time, used to warm start. The collision code never sets these.
+    Real normal_impulse = 0;
+    Real tangent_impulse = 0;
 };
 
 struct Manifold {

@@ -19,11 +19,20 @@ public:
     }
 
     // One step:
-    //   1. find contacts at the current positions
+    //   1. find contacts at the current positions, and match each point to last step's (by id) so
+    //      it can inherit that step's impulse
     //   2. apply gravity/forces to velocities
-    //   3. change velocities so contacts stop approaching (bounce + friction)
+    //   3. change velocities so contacts stop approaching (bounce + friction), warm started
     //   4. move bodies using those velocities
     void step(Real dt);
+
+    // Keeps only the first `count` bodies (e.g. to delete everything added after the level was built).
+    // Use this rather than resizing `bodies` directly: it also drops the remembered contacts, whose
+    // body indices would otherwise point at the wrong bodies and warm start them with stale impulses.
+    void truncate(size_t count) {
+        bodies.resize(count);
+        contacts_.clear();
+    }
 
     // Contacts found during the most recent step (for debug drawing and tests).
     const std::vector<ContactPair>& contacts() const { return contacts_; }

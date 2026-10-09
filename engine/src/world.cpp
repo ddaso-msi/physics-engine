@@ -1,8 +1,11 @@
 #include <phys/world.hpp>
 
+#include <utility>
+
 namespace phys {
 
 void World::step(Real dt) {
+    const std::vector<ContactPair> previous = std::move(contacts_);
     contacts_.clear();
     const int n = static_cast<int>(bodies.size());
     // Every pair: O(n^2). Stage 7 replaces this with a broad phase.
@@ -19,6 +22,8 @@ void World::step(Real dt) {
             }
         }
     }
+
+    transfer_impulses(previous, contacts_);
 
     for (Body& b : bodies) b.integrate_velocity(dt, gravity);
     solve_contacts(bodies, contacts_, dt, solver);

@@ -2,6 +2,9 @@
 #include <phys/world.hpp>
 
 #include <algorithm>
+#include <cstdint>
+#include <initializer_list>
+#include <vector>
 
 using namespace phys;
 
@@ -238,11 +241,21 @@ TEST(tower_of_crates_stands) {
     }
 }
 
-// Each sweep fixes one contact and slightly breaks its neighbours, so a stack needs several. With a
-// single sweep the weight of the upper crates is never transmitted down and the tower falls apart.
-TEST(one_sweep_is_not_enough_to_hold_a_tower) {
-    World w = tower(1, 5.0f);
-    CHECK(w.bodies[4].pos.y < 3.0);  // the top crate should be at 3.5
+// Each sweep fixes one contact and slightly breaks its neighbours, so a stack needs many sweeps in a
+// single frame to pass weight down it... unless the solver starts each frame from the previous
+// frame's impulses (warm starting). Then a single sweep per frame is enough, because the answer
+// only has to be corrected a little each time rather than found from scratch.
+TEST(warm_starting_lets_a_tower_stand_on_one_sweep) {
+    World warm = tower(1, 5.0f);
+    CHECK(warm.bodies[4].pos.y > 3.4);  // the top crate belongs at 3.5
+
+    World cold;
+    cold.solver.warm_starting = false;
+    cold.solver.iterations = 1;
+    cold.add(ground());
+    for (int i = 0; i < 4; ++i) cold.add(crate(0.5f, {0, 0.5f + static_cast<Real>(i) * 1.001f}));
+    run(cold, 600, 1.0f / 120.0f);
+    CHECK(cold.bodies[4].pos.y < 3.0);  // without it the weight never reaches the bottom: the tower falls
 }
 
 // Landing on a corner and tipping flat, the box must finish truly at rest. Clamping the ACCUMULATED
@@ -257,4 +270,131 @@ TEST(tilted_box_settles_flat_and_still) {
     CHECK_NEAR(b.w, 0, 0.001);
     CHECK_NEAR(b.angle, 0, 0.01);
     CHECK_NEAR(b.pos.y, 0.5, 0.01);
+}
+
+// ---- warm starting and contact persistence -------------------------------------------------------
+
+namespace {
+
+ContactPair pair_with_points(int a, int b, std::initializer_list<std::uint32_t> ids, Real normal, Real tangent) {
+    ContactPair p;
+    p.a = a;
+    p.b = b;
+    for (std::uint32_t id : ids) {
+        p.manifold.points[p.manifold.count].id = id;
+        p.manifold.points[p.manifold.count].normal_impulse = normal;
+        p.manifold.points[p.manifold.count].tangent_impulse = tangent;
+        ++p.manifold.count;
+    }
+    return p;
+}
+
+}  // namespace
+
+TEST(impulses_follow_the_same_body_pair_and_feature_id) {
+    std::vector<ContactPair> previous = {pair_with_points(1, 2, {5}, 3.0f, 0.5f), pair_with_points(1, 3, {5}, 9.0f, 0)};
+    previous[0].manifold.points[1] = previous[0].manifold.points[0];
+    previous[0].manifold.points[1].id = 7;
+    previous[0].manifold.points[1].normal_impulse = 4.0f;
+    previous[0].manifold.points[1].tangent_impulse = -0.25f;
+    previous[0].manifold.count = 2;
+
+    // This step: pair (1,2) kept feature 7 and gained a new feature 9; pair (1,3) now touches via a
+    // different feature; pair (2,3) is brand new. Stale values pre-filled to prove they get reset.
+    std::vector<ContactPair> current = {pair_with_points(1, 2, {7, 9}, 99.0f, 99.0f),
+                                        pair_with_points(1, 3, {6}, 99.0f, 99.0f), pair_with_points(2, 3, {5}, 0, 0)};
+    transfer_impulses(previous, current);
+
+    CHECK_NEAR(current[0].manifold.points[0].normal_impulse, 4.0, 1e-6);    // id 7 inherited
+    CHECK_NEAR(current[0].manifold.points[0].tangent_impulse, -0.25, 1e-6);
+    CHECK_NEAR(current[0].manifold.points[1].normal_impulse, 0, 1e-6);      // id 9 is new
+    CHECK_NEAR(current[1].manifold.points[0].normal_impulse, 0, 1e-6);      // different feature: no carry-over
+    CHECK_NEAR(current[2].manifold.points[0].normal_impulse, 0, 1e-6);      // different pair: no carry-over
+}
+
+TEST(resting_box_carries_the_impulse_that_cancels_gravity) {
+    World w;
+    w.add(ground());
+    w.add(crate(0.5f, {0, 0.5f}));  // unit crate: mass 1
+    const Real dt = 1.0f / 120.0f;
+    run(w, 240, dt);
+
+    CHECK(w.contacts().size() == 1);
+    const Manifold& m = w.contacts()[0].manifold;
+    CHECK(m.count == 2);
+    // Every step gravity adds m g dt of downward velocity; the contact impulses must remove exactly that.
+    double total = 0;
+    for (int k = 0; k < m.count; ++k) {
+        CHECK(m.points[k].normal_impulse > 0);
+        total += double(m.points[k].normal_impulse);
+    }
+    CHECK_NEAR(total, kG * double(dt), 0.03 * kG * double(dt));
+    // And they share the load equally between the two corners.
+    CHECK_NEAR(m.points[0].normal_impulse, m.points[1].normal_impulse, 0.1 * double(m.points[0].normal_impulse));
+}
+
+TEST(truncate_forgets_contacts_so_new_bodies_start_fresh) {
+    World w;
+    w.add(ground());
+    w.add(crate(0.5f, {0, 0.5f}));
+    run(w, 120, 1.0f / 120.0f);
+    CHECK(!w.contacts().empty());
+    w.truncate(1);
+    CHECK(w.bodies.size() == 1);
+    CHECK(w.contacts().empty());
+    w.add(crate(0.5f, {0, 1.5f}));  // reuses the old index; must not inherit the old crate's impulse
+    w.step(1.0f / 120.0f);
+    CHECK(w.contacts().empty());
+}
+
+// A tower of ten, only four sweeps per frame: the cold solver cannot carry the weight, the warm one can.
+TEST(warm_starting_holds_a_tall_tower) {
+    auto top_after = [](bool warm) {
+        World w;
+        w.solver.iterations = 4;
+        w.solver.warm_starting = warm;
+        w.add(ground());
+        for (int i = 0; i < 10; ++i) w.add(crate(0.5f, {0, 0.5f + static_cast<Real>(i) * 1.001f}));
+        run(w, 8 * 120, 1.0f / 120.0f);
+        return double(w.bodies[10].pos.y);
+    };
+    CHECK(top_after(true) > 9.3);   // belongs at 9.5
+    CHECK(top_after(false) < 8.0);  // collapsed
+}
+
+// Without warm starting a resting tower creeps sideways forever (the sweeps visit contacts in a fixed
+// order, which biases every frame the same way). With it the tower comes to a true standstill.
+TEST(resting_tower_stops_creeping) {
+    World w;
+    w.add(ground());
+    for (int i = 0; i < 4; ++i) w.add(crate(0.5f, {8.0f, 0.5f + static_cast<Real>(i) * 1.001f}));
+    run(w, 5 * 120, 1.0f / 120.0f);
+    std::vector<Vec2> at5;
+    for (const Body& b : w.bodies) at5.push_back(b.pos);
+    run(w, 5 * 120, 1.0f / 120.0f);
+    for (size_t i = 1; i < w.bodies.size(); ++i) {
+        CHECK_NEAR(w.bodies[i].pos.x, at5[i].x, 0.0005);  // moved less than half a millimetre in 5 s
+        CHECK_NEAR(w.bodies[i].vel.length(), 0, 0.001);
+    }
+}
+
+TEST(pyramid_of_21_crates_stands) {
+    World w;
+    w.add(ground(30));
+    const int base = 6;
+    for (int row = 0; row < base; ++row)
+        for (int i = 0; i < base - row; ++i)
+            w.add(crate(0.5f, {(static_cast<Real>(i) - static_cast<Real>(base - row - 1) * 0.5f) * 1.02f,
+                               0.5f + static_cast<Real>(row) * 1.002f}));
+    std::vector<Vec2> start;
+    for (const Body& b : w.bodies) start.push_back(b.pos);
+    run(w, 8 * 120, 1.0f / 120.0f);
+    double max_move = 0, max_speed = 0;
+    for (size_t i = 1; i < w.bodies.size(); ++i) {
+        max_move = std::max(max_move, double((w.bodies[i].pos - start[i]).length()));
+        max_speed = std::max(max_speed, double(w.bodies[i].vel.length()));
+    }
+    CHECK(w.bodies.size() == 22);
+    CHECK(max_move < 0.05);
+    CHECK(max_speed < 0.01);
 }

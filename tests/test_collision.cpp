@@ -291,3 +291,57 @@ TEST(collision_is_invariant_under_rigid_motion) {
     }
     CHECK(checked > 400);
 }
+
+// ---- feature ids (used to match contact points from one frame to the next) -----------------------
+
+TEST(ids_are_distinct_within_a_manifold_and_stable_while_sliding) {
+    // A crate slides along a floor, always overlapping by 1 cm: the same two corners stay in contact,
+    // so each point must keep its id as the crate moves.
+    Body floor(Shape::make_polygon(Polygon::box(10, 0.5f)), {0, 0}, 0, BodyType::Static);
+    std::vector<std::uint32_t> first;
+    for (int step = 0; step <= 40; ++step) {
+        Body crate_body = box(0.5f, 0.5f, {-2.0f + 0.1f * static_cast<Real>(step), 0.99f});
+        Manifold m;
+        CHECK(collide(floor, crate_body, m));
+        CHECK(m.count == 2);
+        if (m.count != 2) continue;
+        CHECK(m.points[0].id != m.points[1].id);
+        std::vector<std::uint32_t> ids = {m.points[0].id, m.points[1].id};
+        std::sort(ids.begin(), ids.end());
+        if (step == 0) first = ids;
+        CHECK(ids == first);
+    }
+}
+
+TEST(a_different_pair_of_features_gets_different_ids) {
+    Body floor(Shape::make_polygon(Polygon::box(10, 0.5f)), {0, 0}, 0, BodyType::Static);
+    Manifold flat, quarter_turn;
+    CHECK(collide(floor, box(0.5f, 0.5f, {0, 0.99f}), flat));
+    // Turned 90 degrees a square looks the same, but a different edge of it is now on the floor.
+    CHECK(collide(floor, box(0.5f, 0.5f, {0, 0.99f}, kPi / 2), quarter_turn));
+    CHECK(flat.count == 2 && quarter_turn.count == 2);
+    for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 2; ++j) CHECK(flat.points[i].id != quarter_turn.points[j].id);
+}
+
+TEST(tipping_a_box_onto_a_corner_keeps_that_corners_id) {
+    Body floor(Shape::make_polygon(Polygon::box(10, 0.5f)), {0, 0}, 0, BodyType::Static);
+    Manifold flat, tipped;
+    CHECK(collide(floor, box(0.5f, 0.5f, {0, 0.99f}), flat));
+    // Tilted slightly, only the lower corner still touches the floor: it is the same corner, so the
+    // same id as one of the two flat contacts, and it can inherit that point's impulse.
+    CHECK(collide(floor, box(0.5f, 0.5f, {0, 1.04f}, 0.12f), tipped));
+    CHECK(tipped.count == 1);
+    bool shared = false;
+    for (int i = 0; i < flat.count; ++i) shared = shared || flat.points[i].id == tipped.points[0].id;
+    CHECK(shared);
+}
+
+TEST(circle_ids_distinguish_faces_from_corners) {
+    Manifold face, corner;
+    CHECK(collide(box(1, 1, {0, 0}), circle(1.0f, {1.8f, 0}), face));
+    CHECK(collide(box(1, 1, {0, 0}), circle(1.0f, {1.5f, 1.5f}), corner));
+    CHECK((face.points[0].id & 0x100) == 0);    // a face index
+    CHECK((corner.points[0].id & 0x100) != 0);  // a vertex index
+    CHECK(face.points[0].id != corner.points[0].id);
+}

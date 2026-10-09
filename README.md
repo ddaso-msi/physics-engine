@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-5 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response).
+Status: stages 0-6 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence).
 
 ## Layout
 
@@ -120,8 +120,42 @@ speed is `e` times closing speed; a dropped ball leaves at `e` times its arrival
 `mu > tan t`; a sliding disc settles into rolling at exactly 2/3 of its initial speed with `w = -v/r`.
 A tower of four crates stands, and a single solver sweep demonstrably does not hold it.
 
-Known limitations (addressed later): resting stacks creep sideways by a millimetre or two per second
-(Stage 6 warm starting, Stage 9 sleeping); contacts are rebuilt from scratch every step, so there is no
-warm start yet; the broad phase is still all pairs.
+Known limitations after this stage (addressed later): the broad phase is still all pairs (Stage 7).
 
 Demo: click to drop shapes; `M` switches rubber / wood / ice; drop things on the ramps.
+
+## Stage 6: warm starting and contact persistence
+
+Contacts are rebuilt from scratch every step, so by default each step's solver starts from zero
+impulse and has to rediscover how hard every contact is pushing. A resting contact needs nearly the
+same impulse every frame, so we carry it over instead.
+
+- **Feature ids** (`ContactPoint::id`, `collision.cpp`): each contact point is tagged with the pair of
+  geometric features that made it: the reference face, the incident edge, and a tag for whether the
+  point is an original vertex or one created by clipping (and which plane clipped it). Circle contacts
+  use the polygon's face or vertex index. The id is unchanged while the same features touch, so a
+  crate sliding along a floor keeps its two ids, and a box tipping onto a corner keeps that corner's id.
+- **Persistence** (`transfer_impulses`, `World::step`): after finding this step's contacts, each point
+  looks up last step's point with the same body pair and the same id and inherits its accumulated
+  normal and tangent impulse. Points with no match start from zero.
+- **Warm starting** (`solve_contacts`): the inherited impulses are applied to the velocities before
+  the sweeps (as a separate pass after all constraints are built, so no contact's bounce is measured
+  from velocities another contact's old impulse already changed). The sweeps then only have to
+  correct a small change, and the final impulses are written back for the next step.
+
+Measured effect (crates, dt = 1/120, wood):
+
+| scene | warm starting off | warm starting on |
+|---|---|---|
+| tower of 4, 1 sweep per step | collapses (top at 0.5 m, should be 3.5) | stands (3.49 m) |
+| tower of 10, 4 sweeps | collapses | stands (9.46 m, about 1 cm wobble) |
+| pyramid of 21, 4 sweeps | 13 cm of slump | 2 cm |
+| pyramid of 55, 10 sweeps | n/a | stands, max displacement 4 cm, speed 0 |
+| resting tower, sideways creep | about 1.5 mm/s, never stops | frozen after about 3 s |
+
+Both settings are in `SolverSettings` (`warm_starting`, `iterations`). In the demo press `P` for a
+28-crate pyramid, `W` to switch warm starting off, and `-`/`=` to change the number of sweeps.
+
+Not done yet (Stage 9): bodies never sleep, so a settled pile is still simulated every step. Overlap
+is still corrected by Baumgarte velocity bias, which adds a little energy; a separate position solve
+could remove that.

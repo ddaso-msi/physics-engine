@@ -1,6 +1,8 @@
 #include <phys/solver.hpp>
 
 #include <algorithm>
+#include <cstdint>
+#include <unordered_map>
 
 namespace phys {
 
@@ -46,7 +48,34 @@ Real effective_inverse_mass(const ContactConstraint& c, const PointConstraint& p
 
 }  // namespace
 
-void solve_contacts(std::vector<Body>& bodies, const std::vector<ContactPair>& contacts, Real dt,
+void transfer_impulses(const std::vector<ContactPair>& previous, std::vector<ContactPair>& current) {
+    // Key a pair by its two body indices. World always stores a < b, so no ordering concerns.
+    auto key = [](const ContactPair& p) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.a)) << 32) | static_cast<std::uint32_t>(p.b);
+    };
+    std::unordered_map<std::uint64_t, const ContactPair*> by_pair;
+    by_pair.reserve(previous.size());
+    for (const ContactPair& p : previous) by_pair.emplace(key(p), &p);
+
+    for (ContactPair& now : current) {
+        const auto it = by_pair.find(key(now));
+        if (it == by_pair.end()) continue;
+        const Manifold& before = it->second->manifold;
+        for (int k = 0; k < now.manifold.count; ++k) {
+            ContactPoint& cp = now.manifold.points[k];
+            cp.normal_impulse = cp.tangent_impulse = 0;
+            for (int j = 0; j < before.count; ++j) {
+                if (before.points[j].id == cp.id) {
+                    cp.normal_impulse = before.points[j].normal_impulse;
+                    cp.tangent_impulse = before.points[j].tangent_impulse;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt,
                     const SolverSettings& settings) {
     std::vector<ContactConstraint> constraints;
     constraints.reserve(contacts.size());
@@ -81,8 +110,23 @@ void solve_contacts(std::vector<Body>& bodies, const std::vector<ContactPair>& c
             // roughly 1/baumgarte frames.
             const Real push_out = settings.baumgarte / dt * std::max(cp.depth - settings.slop, Real(0));
             p.bias = std::max(bounce, push_out);
+            if (settings.warm_starting) {
+                p.normal_impulse = cp.normal_impulse;
+                p.tangent_impulse = cp.tangent_impulse;
+            }
         }
         constraints.push_back(c);
+    }
+
+    // Warm start: re-apply last step's impulses. This is a separate pass AFTER every constraint was
+    // built, so no contact's arrival speed (and so its bounce) is measured from velocities that
+    // another contact's old impulse has already changed.
+    if (settings.warm_starting) {
+        for (ContactConstraint& c : constraints)
+            for (int k = 0; k < c.count; ++k) {
+                const PointConstraint& p = c.points[k];
+                apply_impulse(c, p, c.normal * p.normal_impulse + c.tangent * p.tangent_impulse);
+            }
     }
 
     for (int sweep = 0; sweep < settings.iterations; ++sweep) {
@@ -108,6 +152,14 @@ void solve_contacts(std::vector<Body>& bodies, const std::vector<ContactPair>& c
                 p.normal_impulse = total;
                 apply_impulse(c, p, c.normal * lambda);
             }
+        }
+    }
+
+    // Remember what we applied, for the next step's warm start.
+    for (size_t i = 0; i < constraints.size(); ++i) {
+        for (int k = 0; k < constraints[i].count; ++k) {
+            contacts[i].manifold.points[k].normal_impulse = constraints[i].points[k].normal_impulse;
+            contacts[i].manifold.points[k].tangent_impulse = constraints[i].points[k].tangent_impulse;
         }
     }
 }
