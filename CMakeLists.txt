@@ -29,3 +29,7 @@ if(SDL3_FOUND)
 else()
   message(STATUS "SDL3 not found, skipping demo")
 endif()
+
+# Physics Puzzle Lab: a puzzle game built on the 2D engine (rules in a library, SDL app on top).
+add_subdirectory(game)
+add_subdirectory(tests_game)
