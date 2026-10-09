@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-4 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision).
+Status: stages 0-5 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response).
 
 ## Layout
 
@@ -24,7 +24,8 @@ tests/    dependency-free test runner
 cmake --preset debug          # Ninja, ASan + UBSan
 cmake --build --preset debug
 ctest --preset debug
-./build/debug/demo/demo               # latest stage (collision debug view); needs SDL3 (brew install sdl3)
+./build/debug/demo/demo               # latest stage (physics sandbox); needs SDL3 (brew install sdl3)
+./build/debug/demo/demo_collision     # stage 4 contact manifold debug view
 ./build/debug/demo/demo_bodies        # stage 3 impulses at a point
 ./build/debug/demo/demo_integrators   # stage 2 spring comparison
 ```
@@ -93,3 +94,34 @@ motion of the whole scene.
 
 Demo: drag bodies together and watch contact points, normals and depths. Wheel or Q/E rotates the
 body under the cursor.
+
+## Stage 5: collision response
+
+`engine/include/phys/solver.hpp`, `world.hpp`. `World::step(dt)` runs: find contacts, apply gravity to
+velocities, solve contacts, move bodies. Only the velocity change is solved; positions follow.
+
+Each contact point is a velocity constraint solved by **sequential impulses**:
+
+- **Normal**: the speed along the normal must reach a target `bias >= 0`. The target is the bounce,
+  `-e * approach_speed` (computed once from the arrival speed, and only above a 1 m/s threshold so
+  resting bodies don't chatter), or a push-out speed `0.2/dt * (depth - slop)` (Baumgarte
+  stabilisation) when the bodies overlap.
+- **Friction**: removes tangential speed, clamped to the Coulomb cone `|jt| <= mu * jn`.
+- Each constraint is fixed in isolation by `lambda = -(v - bias) * effective_mass`, where the
+  effective mass `1 / (1/mA + 1/mB + (r x n)^2/IA + (r x n)^2/IB)` accounts for spin. Fixing one
+  contact disturbs the others, so the solver sweeps all of them (10 times by default).
+- The **accumulated** impulse is clamped (push, never pull; friction inside the cone), not each
+  sweep's increment, so a later sweep can undo an earlier overshoot.
+- Materials mix per contact: restitution = max of the two, friction = sqrt of the product.
+
+Tests use closed forms: elastic equal masses swap velocities; momentum is conserved and separation
+speed is `e` times closing speed; a dropped ball leaves at `e` times its arrival speed and rises to
+`e^2 h`; a block on a 20-degree slope accelerates at `g (sin t - mu cos t)` and holds when
+`mu > tan t`; a sliding disc settles into rolling at exactly 2/3 of its initial speed with `w = -v/r`.
+A tower of four crates stands, and a single solver sweep demonstrably does not hold it.
+
+Known limitations (addressed later): resting stacks creep sideways by a millimetre or two per second
+(Stage 6 warm starting, Stage 9 sleeping); contacts are rebuilt from scratch every step, so there is no
+warm start yet; the broad phase is still all pairs.
+
+Demo: click to drop shapes; `M` switches rubber / wood / ice; drop things on the ramps.

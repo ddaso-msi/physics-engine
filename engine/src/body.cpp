@@ -50,18 +50,24 @@ bool Body::contains(Vec2 world_point) const {
     return true;
 }
 
-void Body::integrate(Real dt, Vec2 gravity) {
-    if (type == BodyType::Static) {
-        force = {};
-        torque = 0;
-        return;
+void Body::integrate_velocity(Real dt, Vec2 gravity) {
+    if (type == BodyType::Dynamic) {
+        vel += (force * inv_mass + gravity) * dt;
+        w += torque * inv_inertia * dt;
     }
-    vel += (force * inv_mass + gravity) * dt;
-    w += torque * inv_inertia * dt;
-    pos += vel * dt;
-    set_angle(angle + w * dt);
     force = {};
     torque = 0;
+}
+
+void Body::integrate_position(Real dt) {
+    if (type == BodyType::Static) return;
+    pos += vel * dt;
+    set_angle(angle + w * dt);
+}
+
+void Body::integrate(Real dt, Vec2 gravity) {
+    integrate_velocity(dt, gravity);
+    integrate_position(dt);
 }
 
 }  // namespace phys

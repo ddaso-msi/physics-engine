@@ -28,6 +28,10 @@ struct Body {
     Real mass = 0, inv_mass = 0;
     Real inertia = 0, inv_inertia = 0;
 
+    // Surface material. A contact between two bodies mixes them (see solver.cpp).
+    Real restitution = static_cast<Real>(0.2);  // 0 = no bounce, 1 = perfectly elastic
+    Real friction = static_cast<Real>(0.5);     // Coulomb coefficient
+
     Body() = default;
     Body(const Shape& shape, Vec2 position, Real angle, BodyType type = BodyType::Dynamic,
          Real density = 1);
@@ -46,7 +50,11 @@ struct Body {
     Real kinetic_energy() const;
     bool contains(Vec2 world_point) const;
 
-    // Semi-implicit Euler (see integrate.hpp). Clears the force accumulators.
+    // Semi-implicit Euler (see integrate.hpp), split in two so a contact solver can run between the
+    // halves: velocities first (consumes and clears forces), then positions from those velocities.
+    void integrate_velocity(Real dt, Vec2 gravity);
+    void integrate_position(Real dt);
+    // Both halves back to back, for bodies that are not in a contact-solving world.
     void integrate(Real dt, Vec2 gravity);
 };
 
