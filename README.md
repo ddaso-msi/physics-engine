@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-8 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence, broad phase, joints).
+Status: stages 0-9 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence, broad phase, joints, sleeping + continuous collision + scene gallery).
 
 ## Layout
 
@@ -16,6 +16,7 @@ Status: stages 0-8 done (build setup, 2D math, integrators + fixed timestep, rig
 engine/   static library "phys" (no graphics dependency)
 demo/     SDL3 debug renderer and scenes
 tests/    dependency-free test runner
+scenes/   library of gallery scenes (Newton's cradle, rag doll, car) shared by the demo and the tests
 bench/    broad phase / World::step timings (build the release preset)
 ```
 
@@ -201,10 +202,18 @@ when bodies double; sweep and prune and the tree need about 2.3x-2.8x as many co
 quicker than the tree depending on size. But sweep and prune sorts on
 one axis, so when many boxes share an x range (a tall stack, a wide floor) it compares nearly every
 pair and ends up slower than brute force: 130x slower than the tree on a 10000-box column. The tree
-has no such pathological case, which is why it is the default. Whole `World::step` with 2000 crates:
-brute force 3.7 ms, sweep and prune 0.33 ms, tree 1.5 ms. The tree's query cost per body also grows
-faster than log n here (about 60 node visits per body at 2000 bodies, 160 at 10000), so there is room
-to improve its quality (for example a periodic bulk rebuild); not done.
+has no such pathological case, which is why it is the default. In a dense pile it is not faster than
+the others: a settled pile of 2000 crates in a closed room (the whole `World::step`, release build) costs
+3.24 ms with brute force, 2.22 ms with sweep and prune and 3.18 ms with the tree, so below a few thousand
+dense bodies the broad phase choice hardly matters and sweep and prune is the cheapest. The tree's query
+cost per body also grows faster than log n (about 60 node visits per body at 2000 bodies, 160 at 10000),
+so there is room to improve its quality (for example a periodic bulk rebuild); not done.
+
+*Correction:* an earlier version of this section quoted whole-step times (brute force 3.7 ms, sweep and
+prune 0.33 ms, tree 1.5 ms at 2000 crates) from a benchmark scene with a floor but no walls. Crates knocked
+sideways fell out of the world and were never colliding again, so most of what it timed was free fall.
+The scene now has walls and starts the crates on a non-overlapping grid, and the numbers above replace
+those. The broad-phase-only tables are unaffected: they time bare boxes.
 
 Demo: `F` rains 100 shapes (up to 1500 bodies), `B` switches broad phase, `T` draws the tree's boxes
 (or each body's tight box in the other modes), and the readout shows box tests, candidate pairs and
@@ -272,3 +281,54 @@ no joint breaking.
 
 Demo: `J` builds a joint level (rope bridge, rope pendulum, spring crate, motorised paddle, tilted rail
 with end stops). Right-drag grabs any dynamic body with a mouse joint.
+
+## Stage 9: sleeping, continuous collision, gallery
+
+**Sleeping** (`World::allow_sleep`, `time_to_sleep` 0.5 s, thresholds 0.01 m/s and 0.035 rad/s). Each step
+builds *islands*, the connected groups of dynamic bodies linked by contacts or joints, with union-find;
+static bodies link nothing, so a floor of separate piles is not one island. A body that is slower than
+both thresholds accumulates sleep time; an island goes to sleep when its *most restless* member has been
+still long enough, so a pile sleeps all at once or not at all. Sleeping bodies are not integrated or
+solved, and a pair where neither body is active is not even collided. Their contacts are kept as *dormant*
+(with their impulses), so waking a sleeping pyramid with a tap warm starts it instead of letting it
+settle again from nothing: the crates below the poked one move less than 2 cm.
+
+Waking: an awake body touching a sleeping island joins it and wakes it (this falls out of building the
+islands from contacts that include the sleepers); setting a body's velocity or applying a force wakes
+it; a mouse joint keeps its body awake; and a motor told to turn (nonzero speed and torque) wakes its
+bodies. That last rule exists because commanding a motor touches no velocity and no force: my first parked
+car simply ignored its throttle until I made commands wake the mechanism. Moving a body by hand needs
+`World::wake`, since the world cannot see a teleport.
+
+**Continuous collision** (`World::continuous`), against static bodies only. A body that moves, *or
+turns*, more than half its inscribed radius in a step is swept along its path: the pose is tested at
+samples no further apart than the inscribed radius, which a convex body at least that wide cannot step
+over however thin the obstacle, and the first hit is refined by bisection. A body that was clear is
+placed just inside the wall so the next step's contact solver responds to a real contact. A fast body
+that starts *already in contact* may sink no deeper than a quarter of its inscribed radius per step.
+
+Two things went wrong before it worked, and are now regression tests. First, a spinning box hit a thin
+wall corner-first: the solver stopped the corner but turned most of the momentum into a 205 rad/s swing,
+and the box's centre ended up on the far side of a 4 cm wall within one step; the sweep had skipped it
+because it "started in contact". Hence the depth cap, and rotation counting as motion (a pinned rod
+spinning at 40 rad/s sweeps 33 cm of tip per step without its centre moving). Second, the sweep must ask
+the narrow phase's exact question, argument order included: at razor-thin overlaps `collide(a, b)` and
+`collide(b, a)` can disagree through rounding. Stress test: 3000 random shots (discs, boxes, triangles, up
+to 200 m/s, walls 1 to 10 cm thick, spin up to 30 rad/s): 64% tunnel without the pass, none with it.
+
+**Gallery** (`scenes/`, demo key `L`): Newton's cradle (rigid ropes, elastic frictionless balls; lifting one
+ball sends one out the far side to 99.6% of its height with the middle three staying put, and two balls
+send two), a rag doll (ten bodies, nine limited hinges, no self-collision), a car (a prismatic slide with
+end stops plus a soft spring per wheel, motors in the axles; 5.4 m/s at 12 rad/s, brakes to a stop in
+0.6 s), and a shooting range for the continuous pass. The car's suspension carrier needs real mass: a
+spring-damper joint's stiffness is frequency times the effective mass of the two bodies it joins, so a
+feather-light carrier gave a feather-weak spring and the suspension bottomed out.
+
+Sleeping, measured (release build, ms per step, a pile of crates dropped into a closed room and settled
+for 20 s, tree broad phase): 250 crates 0.120 ms awake, 0.068 ms asleep (64 still awake); at 500 to 2000
+crates it saved nothing, because one restless crate keeps its whole island awake and large piles keep
+shifting. Whether a given big pile fully sleeps within 20 s also varied between builds, so do not count on
+it: it is a saving for scenes that really come to rest.
+
+Not done: continuous collision between two moving bodies (a fast bullet can still pass through a thin
+*dynamic* plank); splitting a big island so its quiet half could sleep; angular-velocity clamping.

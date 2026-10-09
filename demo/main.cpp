@@ -10,6 +10,12 @@
 //   W warm starting on/off    - / =  fewer / more solver sweeps     C show contacts
 //   P pyramid level    R default level    X clear dynamic bodies    Esc quit
 //
+// Gallery (stage 9):
+//   L  cycle through scenes: sandbox, pyramid, joints, Newton's cradle, rag doll, car, shooting range
+//   S  sleeping on/off (sleeping bodies are drawn dimmed)     K  continuous collision on/off
+//   cradle: Space lifts the first ball again           rag doll: click drops a rag doll
+//   car: left/right arrows drive (release to brake)   range: click or Space fires a bullet at 70 m/s
+//
 // Joints (stage 8):
 //   J  joint level: rope bridge (hinges), rope pendulum and a crate on a spring (distance joints),
 //      a motorised paddle (hinge + motor), a crate on a tilted rail with end stops (prismatic)
@@ -23,6 +29,7 @@
 #include <SDL3/SDL.h>
 #include <phys/timestep.hpp>
 #include <phys/world.hpp>
+#include <scenes.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -233,6 +240,80 @@ void draw_joint(SDL_Renderer* ren, const World& world, const Joint& j) {
     }
 }
 
+enum class Scene { Sandbox, Pyramid, Joints, Cradle, Ragdoll, Car, Range };
+constexpr int kSceneCount = 7;
+const char* scene_name(Scene s) {
+    switch (s) {
+        case Scene::Sandbox: return "sandbox";
+        case Scene::Pyramid: return "pyramid";
+        case Scene::Joints: return "joints";
+        case Scene::Cradle: return "Newton's cradle";
+        case Scene::Ragdoll: return "rag doll";
+        case Scene::Car: return "car";
+        default: return "shooting range";
+    }
+}
+
+// Floor and side walls, like the other levels.
+void add_room(World& world) {
+    world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, 0.25f}, 0));
+    world.add(make_static_box({0.25f, kWorldH * 0.5f}, {0.25f, kWorldH * 0.5f}, 0));
+    world.add(make_static_box({0.25f, kWorldH * 0.5f}, {kWorldW - 0.25f, kWorldH * 0.5f}, 0));
+}
+
+struct Gallery {
+    scenes::Cradle cradle;
+    scenes::Car car;
+    int ragdolls = 0;
+};
+
+void load_scene(Scene scene, World& world, size_t& static_count, Gallery& g) {
+    g = Gallery{};
+    switch (scene) {
+        case Scene::Sandbox: build_level(world, static_count, false); break;
+        case Scene::Pyramid: build_level(world, static_count, true); break;
+        case Scene::Joints: build_joint_level(world, static_count); break;
+        case Scene::Cradle:
+            world.truncate(0);
+            add_room(world);
+            static_count = world.bodies.size();
+            g.cradle = scenes::build_cradle(world, {kWorldW * 0.5f, 9.8f});
+            scenes::lift_cradle_ball(world, g.cradle, 0, -0.75f);
+            break;
+        case Scene::Ragdoll:
+            world.truncate(0);
+            add_room(world);
+            world.add(make_static_box({1.6f, 0.2f}, {5.0f, 2.2f}, -0.35f));  // a ramp to tumble down
+            static_count = world.bodies.size();
+            scenes::build_ragdoll(world, {3.8f, 8.0f}, 1);
+            g.ragdolls = 1;
+            break;
+        case Scene::Car:
+            world.truncate(0);
+            add_room(world);
+            world.add(make_static_box({2.0f, 0.15f}, {10.5f, 0.55f}, 0.22f));  // a ramp up
+            world.add(make_static_box({0.8f, 0.4f}, {5.5f, 0.7f}, 0));            // a bump
+            static_count = world.bodies.size();
+            g.car = scenes::build_car(world, {2.0f, 1.2f}, 1);
+            break;
+        case Scene::Range:
+            world.truncate(0);
+            add_room(world);
+            world.add(make_static_box({0.03f, 4.5f}, {9.5f, 4.75f}, 0));  // a 6 cm wall
+            static_count = world.bodies.size();
+            for (int i = 0; i < 4; ++i)
+                world.add(make_body(Kind::Box, {11.5f, 1.0f + static_cast<float>(i) * 1.001f}, 0, kMaterials[1]));  // resting on the floor (top at y = 0.5)
+            break;
+    }
+}
+
+void fire_bullet(World& world, float y) {
+    Body b(Shape::make_circle(0.12f), {1.0f, y}, 0, BodyType::Dynamic, 3.0f);
+    b.restitution = 0.3f;
+    b.vel = {70.0f, 0.0f};
+    world.add(b);
+}
+
 void draw_aabb(SDL_Renderer* ren, const AABB& box) {
     const SDL_FPoint lo = to_screen(box.lo), hi = to_screen(box.hi);  // y is flipped: lo.y is the bottom
     const SDL_FRect r{lo.x, hi.y, hi.x - lo.x, lo.y - hi.y};
@@ -278,7 +359,9 @@ int main() {
 
     World world;
     size_t static_count = 0;
-    build_level(world, static_count, false);
+    Scene scene = Scene::Sandbox;
+    Gallery gallery;
+    load_scene(scene, world, static_count, gallery);
 
     Kind kind = Kind::Box;
     size_t material = 1;
@@ -287,7 +370,8 @@ int main() {
     bool ghost_mode = false;
     std::uint32_t rain_seed = 1;
     int spawned = 0;
-    int mouse_joint = -1;  // index into world.joints of the joint dragging a body, or -1
+    int mouse_joint = -1;
+    float last_mouse_y = 5.0f;  // index into world.joints of the joint dragging a body, or -1
 
     FixedTimestep timestep(1.0f / 120.0f);
     Uint64 last = SDL_GetTicksNS();
@@ -306,9 +390,20 @@ int main() {
                     case SDLK_M: material = (material + 1) % (sizeof(kMaterials) / sizeof(kMaterials[0])); break;
                     case SDLK_C: show_contacts = !show_contacts; break;
                     case SDLK_X: mouse_joint = -1; world.truncate(static_count); break;
-                    case SDLK_R: mouse_joint = -1; build_level(world, static_count, false); break;
-                    case SDLK_P: mouse_joint = -1; build_level(world, static_count, true); break;
-                    case SDLK_J: mouse_joint = -1; build_joint_level(world, static_count); break;
+                    case SDLK_R: mouse_joint = -1; scene = Scene::Sandbox; load_scene(scene, world, static_count, gallery); break;
+                    case SDLK_P: mouse_joint = -1; scene = Scene::Pyramid; load_scene(scene, world, static_count, gallery); break;
+                    case SDLK_J: mouse_joint = -1; scene = Scene::Joints; load_scene(scene, world, static_count, gallery); break;
+                    case SDLK_L:
+                        mouse_joint = -1;
+                        scene = static_cast<Scene>((static_cast<int>(scene) + 1) % kSceneCount);
+                        load_scene(scene, world, static_count, gallery);
+                        break;
+                    case SDLK_S: world.allow_sleep = !world.allow_sleep; break;
+                    case SDLK_K: world.continuous = !world.continuous; break;
+                    case SDLK_SPACE:
+                        if (scene == Scene::Cradle) scenes::lift_cradle_ball(world, gallery.cradle, 0, -0.75f);
+                        if (scene == Scene::Range) fire_bullet(world, last_mouse_y);
+                        break;
                     case SDLK_W: world.solver.warm_starting = !world.solver.warm_starting; break;
                     case SDLK_MINUS: world.solver.iterations = std::max(1, world.solver.iterations - 1); break;
                     case SDLK_EQUALS: world.solver.iterations = std::min(20, world.solver.iterations + 1); break;
@@ -346,14 +441,20 @@ int main() {
                     }
                 }
             }
+            if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse_y = to_world(e.motion.x, e.motion.y).y;
             if (e.type == SDL_EVENT_MOUSE_MOTION && mouse_joint >= 0 && mouse_joint < static_cast<int>(world.joints.size()))
                 world.joints[static_cast<size_t>(mouse_joint)].target = to_world(e.motion.x, e.motion.y);
             if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_RIGHT && mouse_joint >= 0) {
                 if (mouse_joint < static_cast<int>(world.joints.size())) world.remove_joint(mouse_joint);
                 mouse_joint = -1;
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
-                world.bodies.size() < kMaxBodies) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT && scene == Scene::Range) {
+                fire_bullet(world, to_world(e.button.x, e.button.y).y);
+            } else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT && scene == Scene::Ragdoll &&
+                       world.bodies.size() < kMaxBodies) {
+                scenes::build_ragdoll(world, to_world(e.button.x, e.button.y), 1 + (gallery.ragdolls++ % 13));
+            } else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
+                       world.bodies.size() < kMaxBodies) {
                 // A small angle offset per spawn so stacked drops don't land perfectly aligned.
                 const Real tilt = 0.17f * static_cast<Real>(spawned++ % 5) - 0.3f;
                 Body b = make_body(kind, to_world(e.button.x, e.button.y), tilt, kMaterials[material]);
@@ -363,6 +464,12 @@ int main() {
                 }
                 world.add(b);
             }
+        }
+
+        if (scene == Scene::Car) {
+            const bool* keys = SDL_GetKeyboardState(nullptr);
+            const Real speed = keys[SDL_SCANCODE_RIGHT] ? 12.0f : keys[SDL_SCANCODE_LEFT] ? -12.0f : 0.0f;
+            scenes::set_car_throttle(world, gallery.car, speed, speed != 0 ? 25.0f : 40.0f);  // release = brake
         }
 
         Uint64 now = SDL_GetTicksNS();
@@ -375,6 +482,7 @@ int main() {
         for (const Body& b : world.bodies)
             draw_body(renderer, b,
                       b.type == BodyType::Static ? SDL_Color{110, 114, 130, 255}
+                      : !b.awake                 ? SDL_Color{70, 100, 130, 255}    // asleep
                       : b.category == 0b10       ? SDL_Color{190, 150, 255, 255}  // ghost
                                                  : SDL_Color{120, 200, 255, 255});
 
@@ -428,6 +536,12 @@ int main() {
         SDL_RenderDebugText(renderer, 70.0f, 76.0f, "F rain 100 | B switch broad phase | T show boxes | G ghost mode");
         SDL_RenderDebugTextFormat(renderer, 70.0f, 92.0f, "J joint level | right-drag grabs a body | joints: %d",
                                   static_cast<int>(world.joints.size()));
+        SDL_RenderDebugTextFormat(renderer, 70.0f, 108.0f,
+                                  "L scene: %s | S sleep: %s (%d awake, %d islands) | K CCD: %s (%d swept, %d stopped)",
+                                  scene_name(scene), world.allow_sleep ? "on" : "OFF",
+                                  static_cast<int>(world.stats().awake_bodies), static_cast<int>(world.stats().islands),
+                                  world.continuous ? "on" : "OFF", static_cast<int>(world.stats().ccd_swept),
+                                  static_cast<int>(world.stats().ccd_hits));
         SDL_RenderPresent(renderer);
     }
 

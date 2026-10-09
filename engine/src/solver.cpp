@@ -23,6 +23,7 @@ struct ContactConstraint {
     Vec2 normal, tangent;
     Real friction = 0;
     int count = 0;
+    size_t source = 0;  // index of the ContactPair this came from (dormant pairs are skipped, so it differs from our own index)
     PointConstraint points[2];
 };
 
@@ -86,8 +87,11 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     constraints.reserve(contacts.size());
 
     // Build the constraints from the velocities and overlaps we have right now.
-    for (const ContactPair& pair : contacts) {
+    for (size_t source = 0; source < contacts.size(); ++source) {
+        const ContactPair& pair = contacts[source];
+        if (pair.dormant) continue;
         ContactConstraint c;
+        c.source = source;
         c.a = &bodies[static_cast<size_t>(pair.a)];
         c.b = &bodies[static_cast<size_t>(pair.b)];
         c.normal = pair.manifold.normal;
@@ -166,8 +170,9 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     joint_solver.store();
     for (size_t i = 0; i < constraints.size(); ++i) {
         for (int k = 0; k < constraints[i].count; ++k) {
-            contacts[i].manifold.points[k].normal_impulse = constraints[i].points[k].normal_impulse;
-            contacts[i].manifold.points[k].tangent_impulse = constraints[i].points[k].tangent_impulse;
+            ContactPoint& cp = contacts[constraints[i].source].manifold.points[k];
+            cp.normal_impulse = constraints[i].points[k].normal_impulse;
+            cp.tangent_impulse = constraints[i].points[k].tangent_impulse;
         }
     }
 }

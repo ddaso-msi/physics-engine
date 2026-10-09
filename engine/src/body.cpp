@@ -27,6 +27,15 @@ void Body::set_angle(Real a) {
     q = Rot(angle);
 }
 
+Real Body::inscribed_radius() const {
+    if (shape.type == Shape::Type::Circle) return shape.circle.radius;
+    // The centre of mass is the polygon's origin, so the distance to a face is dot(normal, any vertex on it).
+    const Polygon& p = shape.polygon;
+    Real r = dot(p.normals[0], p.vertices[0]);
+    for (int i = 1; i < p.count; ++i) r = std::min(r, dot(p.normals[i], p.vertices[i]));
+    return r;
+}
+
 void Body::apply_force_at(Vec2 f, Vec2 world_point) {
     force += f;
     torque += cross(world_point - pos, f);

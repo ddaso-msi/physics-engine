@@ -113,6 +113,10 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
     world_ = Body();
 
     for (Joint& j : joints) {
+        // A joint whose bodies are all asleep (or fixed) has nothing to do; its stored impulses wait.
+        const bool live = (j.a >= 0 && bodies[static_cast<size_t>(j.a)].is_active()) ||
+                          (j.b >= 0 && bodies[static_cast<size_t>(j.b)].is_active());
+        if (!live) continue;
         Body* A = j.a < 0 ? &world_ : &bodies[static_cast<size_t>(j.a)];
         Body* B = j.b < 0 ? &world_ : &bodies[static_cast<size_t>(j.b)];
 

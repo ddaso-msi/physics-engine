@@ -3,7 +3,8 @@
 //
 // Part 1: broad phase alone, evenly scattered boxes that jitter a little each frame.
 // Part 2: the same on a tall column of boxes (sweep and prune's worst case).
-// Part 3: whole World::step with crates falling and settling, per broad phase.
+// Part 3: whole World::step with a settled pile of crates, per broad phase.
+// Part 4: what sleeping saves on the same pile.
 #include <phys/world.hpp>
 
 #include <chrono>
@@ -80,30 +81,64 @@ void part1_and_2() {
     }
 }
 
+// n unit-ish crates on a jittered grid (so none start overlapping) dropped into a CLOSED room: floor and
+// two tall walls. Walls matter: without them crates knocked sideways fall off the world forever, and a
+// benchmark that is mostly measuring free fall tells you nothing about contacts.
+void build_room(World& w, int n) {
+    Lcg rng;
+    const Real width = 1.6f * std::sqrt(static_cast<Real>(n)) + 4;
+    auto wall = [&](Vec2 half, Vec2 pos) {
+        Body b(Shape::make_polygon(Polygon::box(half.x, half.y)), pos, 0, BodyType::Static);
+        b.restitution = 0;
+        w.add(b);
+    };
+    wall({width * 0.5f + 1, 0.5f}, {width * 0.5f, -0.5f});
+    wall({0.5f, 60}, {-0.5f, 30});
+    wall({0.5f, 60}, {width + 0.5f, 30});
+    const int cols = static_cast<int>((width - 1) / 0.8f);
+    for (int i = 0; i < n; ++i) {
+        Body b(Shape::make_polygon(Polygon::box(0.3f, 0.3f)),
+               {0.6f + static_cast<Real>(i % cols) * 0.8f, 0.4f + static_cast<Real>(i / cols) * 0.8f}, rng.range(-0.2f, 0.2f));
+        b.restitution = 0;
+        w.add(b);
+    }
+}
+
 void part3() {
-    std::printf("Whole World::step (ms per step), crates scattered above a floor, 20 steps measured after 60 settling\n");
-    std::printf("%7s %10s %12s %10s %10s\n", "bodies", "contacts", "brute", "sweep+prune", "tree");
-    for (int n : {100, 250, 500, 1000, 2000}) {
+    std::printf("Whole World::step (ms per step): crates dropped into a closed room, settled for 20 s, sleeping OFF\n");
+    std::printf("%7s %10s %12s %12s %10s\n", "bodies", "contacts", "brute", "sweep+prune", "tree");
+    for (int n : {250, 500, 1000, 2000}) {
         double ms[3] = {0, 0, 0};
         std::size_t contacts = 0;
         const BroadphaseKind kinds[3] = {BroadphaseKind::BruteForce, BroadphaseKind::SweepAndPrune, BroadphaseKind::DynamicTree};
         for (int k = 0; k < 3; ++k) {
-            Lcg rng;
             World w;
+            w.allow_sleep = false;
             w.broadphase = kinds[k];
-            const Real half = std::sqrt(static_cast<Real>(n)) * 0.8f + 2;  // floor half-width
-            Body floor(Shape::make_polygon(Polygon::box(half, 0.5f)), {half, -0.5f}, 0, BodyType::Static);
-            w.add(floor);
-            for (int i = 0; i < n; ++i) {
-                Body b(Shape::make_polygon(Polygon::box(0.3f, 0.3f)), {rng.range(0.5f, 2 * half - 0.5f), rng.range(0.5f, 6.0f)}, rng.range(0, 3));
-                b.restitution = 0;
-                w.add(b);
-            }
-            for (int i = 0; i < 60; ++i) w.step(1.0f / 60.0f);
-            ms[k] = time_ms(0, 20, [&] { w.step(1.0f / 60.0f); });
+            build_room(w, n);
+            for (int i = 0; i < 20 * 60; ++i) w.step(1.0f / 60.0f);
+            ms[k] = time_ms(0, 30, [&] { w.step(1.0f / 60.0f); });
             contacts = w.stats().contacts;
         }
-        std::printf("%7d %10zu %12.3f %10.3f %10.3f\n", n, contacts, ms[0], ms[1], ms[2]);
+        std::printf("%7d %10zu %12.3f %12.3f %10.3f\n", n, contacts, ms[0], ms[1], ms[2]);
+    }
+    std::printf("\n");
+}
+
+void part4() {
+    std::printf("Sleeping (tree broad phase): same room, settled for 20 s, then ms per step\n");
+    std::printf("%7s %34s %34s\n", "bodies", "sleeping off", "sleeping on");
+    for (int n : {250, 500, 1000, 2000}) {
+        char text[2][64];
+        for (int mode = 0; mode < 2; ++mode) {
+            World w;
+            w.allow_sleep = mode == 1;
+            build_room(w, n);
+            for (int i = 0; i < 20 * 60; ++i) w.step(1.0f / 60.0f);
+            const double ms = time_ms(0, 30, [&] { w.step(1.0f / 60.0f); });
+            std::snprintf(text[mode], sizeof text[mode], "%.3f (%zu awake, %zu islands)", ms, w.stats().awake_bodies, w.stats().islands);
+        }
+        std::printf("%7d %34s %34s\n", n, text[0], text[1]);
     }
 }
 
@@ -112,5 +147,6 @@ void part3() {
 int main() {
     part1_and_2();
     part3();
+    part4();
     return 0;
 }

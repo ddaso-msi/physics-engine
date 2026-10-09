@@ -25,6 +25,9 @@ namespace phys {
 struct ContactPair {
     int a = 0, b = 0;
     Manifold manifold;
+    // Both bodies are asleep (or static): the contact is remembered, with its impulses, so it can warm
+    // start the pile when it wakes, but it takes no part in solving.
+    bool dormant = false;
 };
 
 // Changes the velocities of the bodies so that no contact is moving into its partner (bouncing and

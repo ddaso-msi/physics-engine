@@ -34,6 +34,12 @@ struct Body {
     Real restitution = static_cast<Real>(0.2);  // 0 = no bounce, 1 = perfectly elastic
     Real friction = static_cast<Real>(0.5);     // Coulomb coefficient
 
+    // Sleeping (see World::step). A body whose whole island has been nearly still for long enough stops
+    // being simulated until something disturbs it. Do not move a sleeping body by hand without wake().
+    bool awake = true;
+    bool allow_sleep = true;  // false: this body keeps its whole island awake
+    Real sleep_time = 0;      // how long it has been nearly still
+
     // Collision filtering. `category` says which group(s) this body belongs to, `mask` which groups
     // it is willing to collide with. Two bodies collide only if EACH one's mask admits the other's
     // category, so a one-sided mask cannot make a body push another that cannot push back.
@@ -46,6 +52,16 @@ struct Body {
 
     Transform transform() const;
     void set_angle(Real a);
+
+    // Dynamic and not asleep: the bodies that actually get simulated.
+    bool is_active() const { return type == BodyType::Dynamic && awake; }
+    void wake() {
+        awake = true;
+        sleep_time = 0;
+    }
+    // Radius of the largest circle around the centre of mass that fits inside the shape. Anything
+    // that moves less than this in one step cannot have passed straight through another body.
+    Real inscribed_radius() const;
 
     void apply_force(Vec2 f) { force += f; }
     void apply_torque(Real t) { torque += t; }
