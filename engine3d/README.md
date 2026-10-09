@@ -157,7 +157,25 @@ check. That is guarded now, and while chasing it I made the 8-to-4 point reducti
 Not here yet: joints, sleeping, continuous collision, a broad phase (it tests all pairs), and any way to look
 at it.
 
+## Step 5: a wireframe demo (`demo3d/`)
+
+`./build/debug/demo3d/demo3d` draws the 3D world as lines through an orbit camera: boxes as their 12 edges,
+spheres as three circles fixed in the sphere's own frame (so spin is visible), contacts as a yellow dot with a
+green normal, and a ground grid. Further lines are dimmer; nothing is hidden. `demo3d/camera.hpp` holds the
+camera and projection with no SDL in it, so it is unit tested (frame orthonormal and right-handed, target at the
+screen centre, perspective halving with doubled distance, the field of view filling the window, segments
+clipped at the near plane).
+
+Scenes: `1` a tower of eight crates, `2` the 4-3-2-1 pyramid, `3` forty mixed boxes and spheres raining down,
+`4` a slope with a crate that holds, a crate that slides and a ball that rolls, `5` three bricks tumbling in
+zero gravity, one spun about each of its axes (the middle one keeps flipping; `G` cycles the gyroscopic mode,
+and "explicit" makes them slowly gain speed, "off" stops the middle one flipping at all). Left-drag orbits, the wheel zooms, `Space` shoots a ball
+from the camera, `F` drops ten more bodies, `W` and `-`/`=` change warm starting and the sweep count,
+`Tab` pauses, `H` hides the text, `R` or `Backspace` reloads.
+
+For checking without a window: `SDL_VIDEODRIVER=dummy demo3d --scene 2 --steps 240 --capture out.bmp`.
+
 ## Planned next
 
-A wireframe SDL demo so the 3D engine can be seen; then a 3D broad phase, and GJK/EPA for general convex
-shapes. Joints and sleeping can be ported from the 2D designs when wanted.
+A 3D broad phase (the world tests every pair, so it is limited to a few hundred bodies), GJK/EPA for general
+convex shapes, and joints, sleeping and continuous collision ported from the 2D designs.
