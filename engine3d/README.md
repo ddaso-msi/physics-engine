@@ -43,9 +43,39 @@ angular velocity except along a principal axis. 17 deliberate breakages of the m
 component, wrong quaternion product terms, a missing factor of 2, a transposed inverse, a missing
 `transposed()` in the world-frame rotation...) are each caught.
 
+## Step 2: rigid body state (`body.hpp`, `src/body.cpp`)
+
+A `Body` is the 2D one extended: position of the centre of mass, a `Quat` orientation, linear velocity, an
+angular velocity **vector** `w` (world frame), force and torque accumulators, inverse mass, and the inertia
+tensor and its inverse stored in the body frame and rotated into the world frame on demand. Zero inverse mass
+and inertia mean immovable. `apply_force_at` adds the torque `r x F`; `apply_impulse_at` changes `v` by `j/m`
+and `w` by `I^-1 (r x j)`.
+
+What has no 2D counterpart is the **gyroscopic term**. A free body conserves angular momentum `L = I_world w`,
+and `I_world` turns with the body, so `w` has to change even with no torque: `dw/dt = I^-1 (torque - w x (I w))`.
+`integrate_velocity` offers three treatments (`Gyroscopic`), measured on a tumbling brick over 10 s:
+
+| mode | energy | angular momentum direction |
+|---|---|---|
+| `Off` (w constant) | exactly conserved | wanders by 0.98 rad: wrong physics |
+| `Explicit` (term from the start of the step) | grows: x1.59 at dt 1/60, x1.11 at 1/240; a fast thin plate reaches 10^6 in 5 s | held to 0.006 rad |
+| `Implicit` (one Newton step in the body frame; the default) | never rises; loses 29% at 1/60, 9% at 1/240; the fast plate keeps 99.98% | held to 0.011 rad |
+
+So the default is stable but dissipative: a tumbling body slowly spins down, faster at coarse steps. That is
+the usual trade (it is Catto's formulation) and is far better than gaining energy, but it is not conservation.
+
+Tests (16, 39 in total): mass and inertia of the solid shapes; a fixed body ignores everything, including a
+velocity written into it; free fall; force at a point; an impulse changes linear momentum by `j` and angular
+momentum about the origin by `hit x j` in any orientation; a torque on a turned body meets the world-frame
+inertia; spin about a principal axis is steady in every mode; a sphere needs no gyroscopic term; the table
+above; a symmetric top's body-frame `w` circles its axis at the closed-form rate `(I3 - I1)/I1 * w3`
+(within 2% at dt 1/1000); and the tennis-racket effect: spin about the intermediate axis with a 1% wobble flips
+right over (5 to -4.9 rad/s) while spin about the other two axes stays at 5.000. 14 deliberate breakages of the
+body code are each caught; three survived at first (explicit term's sign, torque using the body-frame inertia,
+fixed bodies moving) and got their own tests.
+
 ## Planned next
 
-Step 2: rigid body state in 3D (`Body` with `Vec3` velocities, `Quat` orientation, world-frame inverse inertia,
-the gyroscopic term for torque-free spin). Step 3: shapes (sphere, box) and 3D contact generation: sphere cases,
-then box-box by SAT over 15 axes with face clipping and the edge-edge case. Then the sequential-impulse solver in
-3D, a wireframe SDL demo, and GJK/EPA for general convex shapes.
+Step 3: shapes (sphere, box) and 3D contact generation: sphere cases, then box-box by SAT over 15 axes with face
+clipping and the edge-edge case. Then the sequential-impulse solver in 3D, a wireframe SDL demo, and GJK/EPA for
+general convex shapes.
