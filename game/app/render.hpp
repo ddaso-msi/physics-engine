@@ -30,8 +30,8 @@ void outline_rect(SDL_Renderer* ren, const SDL_FRect& r, SDL_Color edge);
 void fill_disc(SDL_Renderer* ren, SDL_FPoint centre, float radius, SDL_Color fill);
 // A body, filled and outlined. Circles get a spoke so spin is visible.
 void draw_body(SDL_Renderer* ren, const phys::Body& b, SDL_Color fill, SDL_Color edge);
-// A horizontal dashed line at world height `y` from x0 to x1.
-void dashed_line(SDL_Renderer* ren, float x0, float x1, float y, SDL_Color c);
+// A dashed line between two world points.
+void dashed_line(SDL_Renderer* ren, phys::Vec2 from, phys::Vec2 to, SDL_Color c);
 
 // Text in SDL's built-in 8x8 font, enlarged `scale` times. (x, y) is the top-left corner in pixels.
 void text(SDL_Renderer* ren, float x, float y, float scale, SDL_Color c, SDL_PRINTF_FORMAT_STRING const char* fmt, ...)

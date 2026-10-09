@@ -2,13 +2,16 @@
 // Level 1, Knock It Down. A pyramid of blocks stands on a raised platform; the player has a few balls
 // to knock every block off it. A block counts as down once its centre is below the platform's top,
 // which it cannot be while it is still resting on the platform.
+//
+// There is no setup phase: physics runs the whole time and the player fires into it.
 #include "level.hpp"
 
 #include <vector>
 
 namespace puzzle {
 
-struct KnockDown {
+class KnockDown : public Level {
+public:
     static constexpr int kShots = 3;
     static constexpr Vec2 kMuzzle{2.0f, 2.6f};  // where a ball starts
     static constexpr Real kBallRadius = 0.25f;
@@ -21,22 +24,24 @@ struct KnockDown {
     static constexpr Vec2 kPlatformCenter{14.5f, 3.3f}, kPlatformHalf{1.3f, 0.2f};
     static constexpr Real kFallLine = kPlatformCenter.y + kPlatformHalf.y - 0.1f;
 
-    World world;
     std::vector<int> targets;      // the blocks, as indices into world.bodies
     size_t first_ball = 0;         // bodies from here on are balls the player fired
     int shots_left = kShots;
     int fallen = 0;                // targets below the fall line after the latest step
-    double sim_time = 0;           // simulated seconds since reset
     double last_shot_time = 0;
-    double win_time = 0;           // sim_time when the last block went down
-    Status status = Status::Playing;
 
     KnockDown() { reset(); }
 
-    // Back to the initial state: a new world, full shots, zero time.
-    void reset();
-    // One fixed step of physics, then the objective.
-    void step(Real dt = kTimeStep);
+    const char* name() const override { return "Knock It Down"; }
+    const char* objective() const override { return "Knock every block off the platform."; }
+    std::span<const char* const> help() const override;
+    const char* hint() const override;
+    std::string stats() const override;
+    std::string result() const override;
+    bool has_setup() const override { return false; }
+    Role role(size_t body) const override;
+    void overlay(Overlay& out, Vec2 pointer, bool pointer_active) const override;
+    void press(Vec2 p) override { fire(p); }
 
     // The velocity a ball would get if the player aimed at world point `aim`.
     Vec2 launch_velocity(Vec2 aim) const;
@@ -44,6 +49,11 @@ struct KnockDown {
     // Fires at `aim` if allowed; returns whether a ball was launched.
     bool fire(Vec2 aim);
     int shots_used() const { return kShots - shots_left; }
+
+protected:
+    void clear_setup() override;
+    void build() override;
+    void evaluate() override;
 };
 
 }  // namespace puzzle

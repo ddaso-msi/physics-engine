@@ -85,11 +85,13 @@ void draw_body(SDL_Renderer* ren, const Body& b, SDL_Color fill, SDL_Color edge)
     }
 }
 
-void dashed_line(SDL_Renderer* ren, float x0, float x1, float y, SDL_Color c) {
+void dashed_line(SDL_Renderer* ren, Vec2 from, Vec2 to, SDL_Color c) {
     set_color(ren, c);
     constexpr float kDash = 0.2f;
-    for (float x = x0; x < x1; x += 2 * kDash) {
-        const SDL_FPoint a = to_screen({x, y}), b = to_screen({std::fmin(x + kDash, x1), y});
+    const float length = distance(from, to);
+    const Vec2 dir = (to - from).normalized();
+    for (float d = 0; d < length; d += 2 * kDash) {
+        const SDL_FPoint a = to_screen(from + dir * d), b = to_screen(from + dir * std::fmin(d + kDash, length));
         SDL_RenderLine(ren, a.x, a.y, b.x, b.y);
     }
 }
