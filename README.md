@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-3 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes).
+Status: stages 0-4 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision).
 
 ## Layout
 
@@ -24,7 +24,8 @@ tests/    dependency-free test runner
 cmake --preset debug          # Ninja, ASan + UBSan
 cmake --build --preset debug
 ctest --preset debug
-./build/debug/demo/demo       # rigid bodies; needs SDL3 (brew install sdl3)
+./build/debug/demo/demo               # latest stage (collision debug view); needs SDL3 (brew install sdl3)
+./build/debug/demo/demo_bodies        # stage 3 impulses at a point
 ./build/debug/demo/demo_integrators   # stage 2 spring comparison
 ```
 
@@ -65,3 +66,30 @@ and angular velocity, force/torque accumulators and inverse mass/inertia. Invers
 
 Demo: drag from a point on a body and release. Hit it through the centre and it only translates; hit
 it off-centre and it spins. The long thin bar resists spinning (large `I`), the triangle is the easiest.
+
+## Stage 4: collision detection
+
+`engine/include/phys/collision.hpp`. `collide(a, b, manifold)` handles every circle/polygon pairing.
+A `Manifold` is a unit normal **pointing from A to B**, the minimum translation `depth`, and one or
+two contact points, each with its own depth and placed halfway through the overlap.
+
+- **Circle vs circle**: compare centre distance to the radius sum. Concentric circles pick an
+  arbitrary direction instead of dividing by zero.
+- **Polygon vs circle**: work in the polygon's frame. Find the face the centre is furthest in front of;
+  if that exceeds the radius there is a gap. Otherwise the Voronoi region of that face decides the
+  feature: a vertex (normal = vertex to centre) or the face itself (normal = face normal). A centre
+  inside the polygon exits through the nearest face.
+- **Polygon vs polygon**: separating axis test over both polygons' face normals (enough in 2D). The
+  face with the *least* penetration becomes the reference face. The incident polygon's most
+  anti-parallel edge is clipped to the reference edge's side planes (Sutherland-Hodgman), and the
+  points that end up behind the reference face are the contacts. A small bias keeps A's face as the
+  reference when two are nearly tied, so contacts do not flicker between frames.
+
+Tests: closed-form cases (face-to-face boxes give 2 points, a 45-degree diamond gives 1, clipped
+overlap, every circle region), plus three property tests over thousands of random shape pairs:
+the reported (normal, depth) is exactly the minimum translation that separates the pair; any point
+sampled inside both bodies implies a reported collision; and results are invariant under rigid
+motion of the whole scene.
+
+Demo: drag bodies together and watch contact points, normals and depths. Wheel or Q/E rotates the
+body under the cursor.

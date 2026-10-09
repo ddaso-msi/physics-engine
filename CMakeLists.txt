@@ -15,7 +15,7 @@ if(PHYS_SANITIZE)
 endif()
 
 # Engine: pure library, no graphics dependency.
-add_library(phys STATIC engine/src/shapes.cpp engine/src/body.cpp)
+add_library(phys STATIC engine/src/shapes.cpp engine/src/body.cpp engine/src/collision.cpp)
 target_include_directories(phys PUBLIC engine/include)
 
 enable_testing()
