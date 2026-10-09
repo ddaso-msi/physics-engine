@@ -14,9 +14,9 @@ if(PHYS_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-# Engine: pure library, no graphics dependency. Header-only until stage 3 adds sources.
-add_library(phys INTERFACE)
-target_include_directories(phys INTERFACE engine/include)
+# Engine: pure library, no graphics dependency.
+add_library(phys STATIC engine/src/shapes.cpp engine/src/body.cpp)
+target_include_directories(phys PUBLIC engine/include)
 
 enable_testing()
 add_subdirectory(tests)

@@ -1,0 +1,53 @@
+#pragma once
+// Stage 3: rigid body state and its integration.
+//
+// pos is the centre of mass. Forces and torques accumulate until integrate() consumes them.
+// Gravity is applied as an acceleration, so it does not depend on mass.
+#include "math.hpp"
+#include "shapes.hpp"
+
+namespace phys {
+
+enum class BodyType { Static, Dynamic };
+
+struct Body {
+    BodyType type = BodyType::Dynamic;
+    Shape shape;
+
+    Vec2 pos;
+    Real angle = 0;
+    Rot q;
+
+    Vec2 vel;
+    Real w = 0;  // angular velocity, rad/s, counter-clockwise positive
+
+    Vec2 force;
+    Real torque = 0;
+
+    // Inverse mass/inertia of 0 means "infinite": the body cannot be accelerated or spun.
+    Real mass = 0, inv_mass = 0;
+    Real inertia = 0, inv_inertia = 0;
+
+    Body() = default;
+    Body(const Shape& shape, Vec2 position, Real angle, BodyType type = BodyType::Dynamic,
+         Real density = 1);
+
+    Transform transform() const;
+    void set_angle(Real a);
+
+    void apply_force(Vec2 f) { force += f; }
+    void apply_torque(Real t) { torque += t; }
+    // A force away from the centre of mass also produces torque r x F.
+    void apply_force_at(Vec2 f, Vec2 world_point);
+    // Instant change of momentum: dv = j/m, dw = (r x j)/I.
+    void apply_impulse_at(Vec2 j, Vec2 world_point);
+
+    Vec2 velocity_at(Vec2 world_point) const { return vel + cross(w, world_point - pos); }
+    Real kinetic_energy() const;
+    bool contains(Vec2 world_point) const;
+
+    // Semi-implicit Euler (see integrate.hpp). Clears the force accumulators.
+    void integrate(Real dt, Vec2 gravity);
+};
+
+}  // namespace phys

@@ -1,44 +1,83 @@
-// Stage 2 demo: the same spring (x'' = -k x) integrated three ways, side by side.
-// Explicit Euler gains energy and flies off; semi-implicit Euler and Verlet stay bounded.
-// The bar under each row is current energy / starting energy (clamped to the bar's width).
-// R resets, Esc quits.
+// Stage 3 demo: rigid body state. Bodies float in zero gravity with no collisions yet.
+//
+// Drag from a point ON a body and release: that applies an impulse at that point, toward where you
+// released. Push through the centre and the body just translates; push off-centre and it also
+// spins, by r x j / I. Green line = velocity, yellow dot = centre of mass.
+//
+//   G toggles gravity   R resets   Esc quits
+// Bodies wrap around the window edges (demo only; the engine has no walls yet).
 #include <SDL3/SDL.h>
-#include <phys/integrate.hpp>
+#include <phys/body.hpp>
 #include <phys/timestep.hpp>
 
 #include <cmath>
+#include <vector>
 
 using namespace phys;
 
 namespace {
 
 constexpr int kWidth = 960, kHeight = 640;
-constexpr float kPixelsPerMeter = 90.0f;
-constexpr float kStiffness = 36.0f;  // omega = 6 rad/s; large enough that Euler's error shows in seconds
+constexpr float kPixelsPerMeter = 60.0f;
+constexpr float kWorldW = static_cast<float>(kWidth) / kPixelsPerMeter;
+constexpr float kWorldH = static_cast<float>(kHeight) / kPixelsPerMeter;
 
-struct Row {
-    const char* label;
-    Integrator kind;
-    SDL_Color color;
-    Particle p;
-};
+SDL_FPoint to_screen(Vec2 w) { return {w.x * kPixelsPerMeter, (kWorldH - w.y) * kPixelsPerMeter}; }
+Vec2 to_world(float sx, float sy) { return {sx / kPixelsPerMeter, kWorldH - sy / kPixelsPerMeter}; }
 
-double energy(const Particle& p) {
-    return 0.5 * double(p.vel.length_sq()) + 0.5 * double(kStiffness) * double(p.pos.length_sq());
+std::vector<Body> make_scene() {
+    std::vector<Body> bodies;
+    bodies.emplace_back(Shape::make_polygon(Polygon::box(1.0f, 0.5f)), Vec2{3.0f, 7.0f}, 0.3f);
+
+    bodies.emplace_back(Shape::make_circle(0.8f), Vec2{8.0f, 5.5f}, 0.0f);
+
+    const Vec2 tri[3] = {{0, 0}, {2.2f, 0}, {0.5f, 1.8f}};
+    bodies.emplace_back(Shape::make_polygon(*Polygon::from_points(tri)), Vec2{12.5f, 7.0f}, 0.0f);
+
+    // A long thin bar is hard to spin about its centre: large inertia relative to its mass.
+    bodies.emplace_back(Shape::make_polygon(Polygon::box(2.2f, 0.18f)), Vec2{8.0f, 2.2f}, -0.2f);
+    return bodies;
 }
 
-void reset(Row (&rows)[3]) {
-    for (Row& r : rows) r.p = Particle{{1.0f, 0.0f}, {0.0f, 0.0f}};
-}
-
-void draw_circle(SDL_Renderer* ren, float cx, float cy, float radius) {
-    constexpr int kSegments = 28;
-    SDL_FPoint pts[kSegments + 1];
-    for (int i = 0; i <= kSegments; ++i) {
-        float a = 2.0f * kPi * static_cast<float>(i) / kSegments;
-        pts[i] = {cx + radius * std::cos(a), cy + radius * std::sin(a)};
+void draw_body(SDL_Renderer* ren, const Body& b) {
+    SDL_SetRenderDrawColor(ren, 120, 200, 255, 255);
+    if (b.shape.type == Shape::Type::Circle) {
+        constexpr int kSegments = 36;
+        SDL_FPoint pts[kSegments + 1];
+        for (int i = 0; i <= kSegments; ++i) {
+            float a = 2.0f * kPi * static_cast<float>(i) / kSegments;
+            pts[i] = to_screen(b.pos + rotate(b.q, Vec2{b.shape.circle.radius * std::cos(a),
+                                                        b.shape.circle.radius * std::sin(a)}));
+        }
+        SDL_RenderLines(ren, pts, kSegments + 1);
+        // One spoke so rotation is visible on a symmetric shape.
+        SDL_FPoint c = to_screen(b.pos), tip = to_screen(b.pos + b.q.x_axis() * b.shape.circle.radius);
+        SDL_RenderLine(ren, c.x, c.y, tip.x, tip.y);
+    } else {
+        const Polygon& p = b.shape.polygon;
+        SDL_FPoint pts[Polygon::kMaxVertices + 1];
+        for (int i = 0; i <= p.count; ++i) pts[i] = to_screen(apply(b.transform(), p.vertices[i % p.count]));
+        SDL_RenderLines(ren, pts, p.count + 1);
     }
-    SDL_RenderLines(ren, pts, kSegments + 1);
+
+    SDL_FPoint c = to_screen(b.pos);
+    SDL_SetRenderDrawColor(ren, 110, 220, 140, 255);
+    SDL_FPoint v = to_screen(b.pos + b.vel * 0.4f);
+    SDL_RenderLine(ren, c.x, c.y, v.x, v.y);
+    SDL_SetRenderDrawColor(ren, 255, 210, 90, 255);
+    SDL_FRect dot{c.x - 3.0f, c.y - 3.0f, 6.0f, 6.0f};
+    SDL_RenderFillRect(ren, &dot);
+
+    SDL_SetRenderDrawColor(ren, 150, 154, 170, 255);
+    SDL_RenderDebugTextFormat(ren, c.x + 12.0f, c.y + 12.0f, "m=%.2f I=%.2f w=%.2f", static_cast<double>(b.mass),
+                              static_cast<double>(b.inertia), static_cast<double>(b.w));
+}
+
+void wrap(Body& b) {
+    if (b.pos.x < 0) b.pos.x += kWorldW;
+    if (b.pos.x > kWorldW) b.pos.x -= kWorldW;
+    if (b.pos.y < 0) b.pos.y += kWorldH;
+    if (b.pos.y > kWorldH) b.pos.y -= kWorldH;
 }
 
 }  // namespace
@@ -50,20 +89,19 @@ int main() {
     }
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
-    if (!SDL_CreateWindowAndRenderer("physics-engine: stage 2 integrators", kWidth, kHeight, 0, &window,
-                                     &renderer)) {
+    if (!SDL_CreateWindowAndRenderer("physics-engine: rigid bodies", kWidth, kHeight, 0, &window, &renderer)) {
         SDL_Log("window creation failed: %s", SDL_GetError());
         SDL_Quit();
         return 1;
     }
 
-    Row rows[3] = {
-        {"explicit Euler", Integrator::ExplicitEuler, {255, 110, 100, 255}, {}},
-        {"semi-implicit Euler", Integrator::SemiImplicitEuler, {255, 210, 90, 255}, {}},
-        {"velocity Verlet", Integrator::VelocityVerlet, {110, 220, 140, 255}, {}},
-    };
-    reset(rows);
-    const double e0 = energy(rows[0].p);
+    std::vector<Body> bodies = make_scene();
+    bool gravity_on = false;
+
+    // Drag state: which body, and where on it (in its own frame so the grab point rides along).
+    int grabbed = -1;
+    Vec2 grab_local;
+    Vec2 mouse;
 
     FixedTimestep timestep(1.0f / 60.0f);
     Uint64 last = SDL_GetTicksNS();
@@ -74,39 +112,55 @@ int main() {
             if (e.type == SDL_EVENT_QUIT) running = false;
             if (e.type == SDL_EVENT_KEY_DOWN) {
                 if (e.key.key == SDLK_ESCAPE) running = false;
-                if (e.key.key == SDLK_R) reset(rows);
+                if (e.key.key == SDLK_G) gravity_on = !gravity_on;
+                if (e.key.key == SDLK_R) { bodies = make_scene(); grabbed = -1; }
+            }
+            if (e.type == SDL_EVENT_MOUSE_MOTION) mouse = to_world(e.motion.x, e.motion.y);
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+                mouse = to_world(e.button.x, e.button.y);
+                for (int i = static_cast<int>(bodies.size()) - 1; i >= 0; --i) {
+                    if (bodies[static_cast<size_t>(i)].contains(mouse)) {
+                        grabbed = i;
+                        grab_local = apply_inv(bodies[static_cast<size_t>(i)].transform(), mouse);
+                        break;
+                    }
+                }
+            }
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT && grabbed >= 0) {
+                mouse = to_world(e.button.x, e.button.y);
+                Body& b = bodies[static_cast<size_t>(grabbed)];
+                Vec2 hit = apply(b.transform(), grab_local);
+                // Scale by mass so every body gets a comparable velocity kick for the same drag.
+                b.apply_impulse_at((mouse - hit) * (b.mass * 2.0f), hit);
+                grabbed = -1;
             }
         }
 
         Uint64 now = SDL_GetTicksNS();
         Real frame = static_cast<Real>(static_cast<double>(now - last) * 1e-9);
         last = now;
+        const Vec2 g = gravity_on ? Vec2{0.0f, -9.81f} : Vec2{};
         timestep.advance(frame, [&](Real dt) {
-            for (Row& r : rows)
-                step(r.p, dt, r.kind, [](const Particle& p) { return Vec2{-kStiffness * p.pos.x, -kStiffness * p.pos.y}; });
+            for (Body& b : bodies) {
+                b.integrate(dt, g);
+                wrap(b);
+            }
         });
 
         SDL_SetRenderDrawColor(renderer, 20, 22, 28, 255);
         SDL_RenderClear(renderer);
-        for (int i = 0; i < 3; ++i) {
-            const Row& r = rows[i];
-            const float y = 130.0f + 190.0f * static_cast<float>(i);
-            const float cx = kWidth * 0.5f;
-            SDL_SetRenderDrawColor(renderer, 70, 74, 90, 255);
-            SDL_RenderLine(renderer, 0.0f, y, static_cast<float>(kWidth), y);          // rest line
-            SDL_RenderLine(renderer, cx, y - 14.0f, cx, y + 14.0f);                    // equilibrium tick
-            SDL_SetRenderDrawColor(renderer, r.color.r, r.color.g, r.color.b, 255);
-            const float px = cx + r.p.pos.x * kPixelsPerMeter;
-            SDL_RenderLine(renderer, cx, y, px, y);                                    // the "spring"
-            draw_circle(renderer, px, y, 12.0f);
+        for (const Body& b : bodies) draw_body(renderer, b);
 
-            const float bar = 360.0f * static_cast<float>(std::fmin(energy(r.p) / e0, 1.0) * 0.5);
-            SDL_FRect box{40.0f, y + 40.0f, bar, 8.0f};
-            SDL_RenderFillRect(renderer, &box);
-            SDL_RenderDebugText(renderer, 40.0f, y - 60.0f, r.label);
+        if (grabbed >= 0) {
+            const Body& b = bodies[static_cast<size_t>(grabbed)];
+            SDL_FPoint a = to_screen(apply(b.transform(), grab_local)), m = to_screen(mouse);
+            SDL_SetRenderDrawColor(renderer, 255, 110, 100, 255);
+            SDL_RenderLine(renderer, a.x, a.y, m.x, m.y);
         }
         SDL_SetRenderDrawColor(renderer, 150, 154, 170, 255);
-        SDL_RenderDebugText(renderer, 40.0f, 16.0f, "same spring, same dt=1/60. Bars: energy / start (half = 1x, full = 2x+). R resets.");
+        SDL_RenderDebugText(renderer, 16.0f, 12.0f,
+                            "drag from a body and release to push it at that point | G gravity | R reset");
+        SDL_RenderDebugText(renderer, 16.0f, 28.0f, gravity_on ? "gravity: on" : "gravity: off");
         SDL_RenderPresent(renderer);
     }
 

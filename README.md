@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-2 done (build setup, 2D math, integrators + fixed timestep).
+Status: stages 0-3 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes).
 
 ## Layout
 
@@ -24,7 +24,8 @@ tests/    dependency-free test runner
 cmake --preset debug          # Ninja, ASan + UBSan
 cmake --build --preset debug
 ctest --preset debug
-./build/debug/demo/demo       # needs SDL3 (brew install sdl3)
+./build/debug/demo/demo       # rigid bodies; needs SDL3 (brew install sdl3)
+./build/debug/demo/demo_integrators   # stage 2 spring comparison
 ```
 
 ## Stage 2: integration
@@ -43,3 +44,24 @@ Semi-implicit Euler is what the rest of the engine will use (cheap, one force ev
 spiral of death.
 
 Demo: three identical springs, one per scheme. Watch the red one fly off while the others stay put.
+
+## Stage 3: rigid body state
+
+`engine/include/phys/shapes.hpp`, `body.hpp`. A `Body` is a centre-of-mass position, an angle, linear
+and angular velocity, force/torque accumulators and inverse mass/inertia. Inverse values of 0 mean
+"infinite", which is how static bodies are represented: no special cases in the maths.
+
+- **Shapes** live in body space with the centre of mass at the origin. `Polygon::from_points` accepts
+  either winding, recentres on the centroid, computes outward normals, and rejects concave,
+  collinear, degenerate or >8-vertex input.
+- **Mass and inertia** from uniform density. Circle: `m = rho pi r^2`, `I = m r^2 / 2`. Polygon: fan
+  of triangles from the centroid, each adding `rho * D/12 * (e1.e1 + e1.e2 + e2.e2)` with `D = e1 x e2`.
+  Tests check box, regular n-gons (`I = m R^2/6 (1 + 2cos^2(pi/n))`) and an off-origin box.
+- **Force at a point** adds torque `r x F`; **impulse at a point** changes velocity by `j/m` and
+  angular velocity by `(r x j)/I`. A test confirms the impulse changes angular momentum about the
+  world origin by exactly `p x j`.
+- Gravity is an acceleration (mass-independent). Integration is semi-implicit Euler for both
+  linear and angular state.
+
+Demo: drag from a point on a body and release. Hit it through the centre and it only translates; hit
+it off-centre and it spins. The long thin bar resists spinning (large `I`), the triangle is the easiest.
