@@ -15,6 +15,10 @@
 //   --steps N          advance the simulation N fixed steps
 //   --key NAME         run, reset, pause, help, contacts, next, escape, left, right
 //   --capture FILE     draw the current frame and save it as a BMP
+//   --record FILE      from here on, --steps and --glide also write video: one raw RGB24 frame per two
+//                      steps (60 a second) to FILE, and a line per audible event (impacts, clicks,
+//                      results) to FILE.events, for a separate tool to turn into a soundtrack
+//   --glide X Y N      move the cursor to a world position over N steps
 #include "render.hpp"
 #include "scene.hpp"
 
@@ -22,8 +26,12 @@
 #include <levels/levels.hpp>
 #include <phys/timestep.hpp>
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 #include <memory>
 #include <string>
 
@@ -50,6 +58,22 @@ struct App {
     phys::FixedTimestep timestep{kTimeStep};
 };
 
+// Video capture for the scripted run. Off (no files) unless --record was given.
+struct Recorder {
+    std::FILE* video = nullptr;
+    std::FILE* events = nullptr;
+    int tick = 0;                               // fixed steps since recording began
+    std::unordered_set<std::uint64_t> touching; // body pairs in contact after the previous step
+    const Level* watched = nullptr;             // the level `touching` and `status` describe
+    Status status = Status::Playing;
+};
+Recorder g_recorder;
+
+// Writes one line to the event log: the time in seconds, what happened, and how hard.
+void note(const char* what, double strength = 1.0) {
+    if (g_recorder.events) std::fprintf(g_recorder.events, "%.4f %s %.4f\n", g_recorder.tick / 120.0, what, strength);
+}
+
 struct BarButton {
     Button button;
     Action action;
@@ -74,6 +98,7 @@ void start_level(App& app, int index) {
     app.index = index;
     app.paused = app.show_help = app.pressed = false;
     app.timestep = phys::FixedTimestep(kTimeStep);
+    note("select");
 }
 
 void leave_level(App& app) {
@@ -88,11 +113,13 @@ void apply(App& app, Action action) {
             if (!level.has_setup()) break;
             if (level.phase == Phase::Setup) level.start();
             else level.stop();
+            note(level.phase == Phase::Running ? "run" : "stop");
             app.paused = app.pressed = false;
             app.timestep = phys::FixedTimestep(kTimeStep);  // no leftover time from the previous run
             break;
         case Action::Reset:
             level.reset();
+            note("stop");
             app.paused = app.pressed = false;
             app.timestep = phys::FixedTimestep(kTimeStep);
             break;
@@ -132,7 +159,10 @@ void press(App& app, float x, float y) {
         }
     if (over_world(app) && !app.paused) {
         app.pressed = true;
+        const size_t bodies = app.level->world.bodies.size();
         app.level->press(to_world(x, y));
+        if (app.level->phase == Phase::Running && app.level->world.bodies.size() > bodies) note("fire");
+        else if (app.level->phase == Phase::Setup) note("pick", 0.5);
     }
 }
 
@@ -145,7 +175,10 @@ void move(App& app, float x, float y) {
 void release(App& app, float x, float y) {
     app.mouse_x = x;
     app.mouse_y = y;
-    if (app.level && app.pressed) app.level->release(to_world(x, y));
+    if (app.level && app.pressed) {
+        app.level->release(to_world(x, y));
+        if (app.level->phase == Phase::Setup) note("place");
+    }
     app.pressed = false;
 }
 
@@ -315,6 +348,62 @@ void draw(SDL_Renderer* ren, const App& app) {
     draw_hud(ren, app);
 }
 
+// ---- recording (see Recorder) ----
+
+void draw_cursor(SDL_Renderer* ren, const App& app) {
+    const SDL_FPoint p{app.mouse_x, app.mouse_y};
+    fill_disc(ren, p, app.pressed ? 11.0f : 8.0f, {10, 12, 18, 255});
+    fill_disc(ren, p, app.pressed ? 8.0f : 6.0f, app.pressed ? color::kTarget : color::kText);
+}
+
+// One fixed step of the game, plus whatever the recording needs from it.
+bool tick(App& app, SDL_Renderer* ren) {
+    update(app, kTimeStep * 1.0001f);
+    Recorder& rec = g_recorder;
+    if (!rec.video) return true;
+
+    // Sounds come from the simulation: a pair of bodies that was not touching last step and is now.
+    const Level* level = app.level.get();
+    if (level != rec.watched) {
+        rec.watched = level;
+        rec.touching.clear();
+        rec.status = Status::Playing;
+    }
+    if (level && level->phase == Phase::Running && !app.paused) {
+        std::unordered_set<std::uint64_t> now;
+        for (const phys::ContactPair& c : level->world.contacts()) {
+            if (c.dormant || c.manifold.count == 0) continue;
+            const std::uint64_t pair = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.a)) << 32) | static_cast<std::uint32_t>(c.b);
+            now.insert(pair);
+            if (rec.touching.count(pair)) continue;
+            double impulse = 0;
+            for (int k = 0; k < c.manifold.count; ++k) impulse += static_cast<double>(c.manifold.points[k].normal_impulse);
+            if (impulse > 0.02 && level->sim_time > 0.1) note("impact", impulse);
+        }
+        rec.touching = std::move(now);
+    } else {
+        rec.touching.clear();
+    }
+    if (level && level->status != rec.status) {
+        rec.status = level->status;
+        if (rec.status == Status::Won) note("win");
+        if (rec.status == Status::Failed) note("fail");
+    }
+
+    if (++rec.tick % 2 != 0) return true;
+    draw(ren, app);
+    draw_cursor(ren, app);
+    SDL_Surface* shot = SDL_RenderReadPixels(ren, nullptr);
+    SDL_Surface* rgb = shot ? SDL_ConvertSurface(shot, SDL_PIXELFORMAT_RGB24) : nullptr;
+    bool ok = rgb != nullptr;
+    for (int y = 0; ok && y < rgb->h; ++y)
+        ok = std::fwrite(static_cast<const Uint8*>(rgb->pixels) + static_cast<size_t>(y) * static_cast<size_t>(rgb->pitch), 3,
+                         static_cast<size_t>(rgb->w), rec.video) == static_cast<size_t>(rgb->w);
+    SDL_DestroySurface(rgb);
+    SDL_DestroySurface(shot);
+    return ok;
+}
+
 // ---- scripted run (see the top of the file) ----
 
 bool run_script(App& app, SDL_Renderer* ren, int argc, char** argv) {
@@ -332,7 +421,27 @@ bool run_script(App& app, SDL_Renderer* ren, int argc, char** argv) {
             if (is(a, "--release") || is(a, "--click")) release(app, p.x, p.y);
         } else if (is(a, "--steps")) {
             const int n = static_cast<int>(number(++i));
-            for (int s = 0; s < n; ++s) update(app, kTimeStep * 1.0001f);
+            for (int s = 0; s < n; ++s)
+                if (!tick(app, ren)) return false;
+        } else if (is(a, "--glide")) {
+            const SDL_FPoint to = to_screen({number(i + 1), number(i + 2)});
+            const int n = std::max(1, static_cast<int>(number(i + 3)));
+            i += 3;
+            const float x0 = app.mouse_x, y0 = app.mouse_y;
+            for (int s = 1; s <= n; ++s) {
+                float t = static_cast<float>(s) / static_cast<float>(n);
+                t = t * t * (3.0f - 2.0f * t);  // ease in and out, like a hand
+                move(app, x0 + (to.x - x0) * t, y0 + (to.y - y0) * t);
+                if (!tick(app, ren)) return false;
+            }
+        } else if (is(a, "--record") && i + 1 < argc) {
+            const std::string path = argv[++i];
+            g_recorder.video = std::fopen(path.c_str(), "wb");
+            g_recorder.events = std::fopen((path + ".events").c_str(), "w");
+            if (!g_recorder.video || !g_recorder.events) {
+                SDL_Log("cannot record to %s", path.c_str());
+                return false;
+            }
         } else if (is(a, "--key") && i + 1 < argc) {
             const char* k = argv[++i];
             key(app, is(k, "run") ? SDLK_SPACE : is(k, "reset") ? SDLK_R : is(k, "pause") ? SDLK_TAB : is(k, "help") ? SDLK_H
@@ -388,6 +497,8 @@ int main(int argc, char** argv) {
     }
 
     app.level.reset();
+    if (g_recorder.video) std::fclose(g_recorder.video);
+    if (g_recorder.events) std::fclose(g_recorder.events);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
