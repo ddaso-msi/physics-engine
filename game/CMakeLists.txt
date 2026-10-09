@@ -1,5 +1,6 @@
 # Game rules: levels, objectives, counters. No SDL here, so the tests can play a level headless.
-add_library(phys_game STATIC level.cpp objectives.cpp levels/levels.cpp levels/knock_down.cpp)
+add_library(phys_game STATIC level.cpp objectives.cpp pieces.cpp levels/levels.cpp levels/knock_down.cpp levels/bridge.cpp
+            levels/pendulum.cpp levels/chain_reaction.cpp levels/tower.cpp)
 target_include_directories(phys_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(phys_game PUBLIC phys_scenes)
 

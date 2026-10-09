@@ -55,11 +55,11 @@ struct BarButton {
     Action action;
 };
 constexpr BarButton kButtons[] = {
-    {{{478.0f, 10.0f, 152.0f, 36.0f}, "Space Run"}, Action::Run},
-    {{{636.0f, 10.0f, 152.0f, 36.0f}, "R Reset"}, Action::Reset},
-    {{{794.0f, 10.0f, 152.0f, 36.0f}, "Tab Pause"}, Action::Pause},
-    {{{952.0f, 10.0f, 152.0f, 36.0f}, "H Help"}, Action::Help},
-    {{{1110.0f, 10.0f, 152.0f, 36.0f}, "Esc Menu"}, Action::Menu},
+    {{{452.0f, 10.0f, 176.0f, 36.0f}, "Space Run"}, Action::Run},
+    {{{636.0f, 10.0f, 136.0f, 36.0f}, "R Reset"}, Action::Reset},
+    {{{780.0f, 10.0f, 176.0f, 36.0f}, "Tab Pause"}, Action::Pause},
+    {{{964.0f, 10.0f, 120.0f, 36.0f}, "H Help"}, Action::Help},
+    {{{1092.0f, 10.0f, 168.0f, 36.0f}, "Esc Menu"}, Action::Menu},
 };
 
 SDL_FRect card_rect(int i) { return {140.0f, 250.0f + 78.0f * static_cast<float>(i), 1000.0f, 64.0f}; }
@@ -217,7 +217,7 @@ void draw_hud(SDL_Renderer* ren, const App& app) {
     const bool setup = level.phase == Phase::Setup;
     const char* mode = app.paused ? "PAUSED" : level.status == Status::Won ? "SOLVED" : level.status == Status::Failed ? "FAILED" : setup ? "SETUP" : "RUNNING";
     const SDL_Color mode_color = app.paused ? color::kTarget : level.status == Status::Won ? color::kGood : level.status == Status::Failed ? color::kBad : setup ? color::kToolEdge : color::kText;
-    const SDL_FRect pill{344.0f, 12.0f, 124.0f, 32.0f};
+    const SDL_FRect pill{320.0f, 12.0f, 124.0f, 32.0f};
     outline_rect(ren, pill, mode_color);
     text_centered(ren, pill.x + pill.w * 0.5f, 20.0f, 2.0f, mode_color, mode);
 
@@ -225,7 +225,7 @@ void draw_hud(SDL_Renderer* ren, const App& app) {
         Button button = b.button;
         const bool enabled = b.action != Action::Run || level.has_setup();
         if (b.action == Action::Run && !setup && level.has_setup()) button.label = "Space Stop";
-        if (b.action == Action::Pause && app.paused) button.label = "Tab Go";
+        if (b.action == Action::Pause && app.paused) button.label = "Tab Resume";
         draw_button(ren, button, button.hit(app.mouse_x, app.mouse_y), enabled);
     }
 
@@ -246,12 +246,13 @@ void draw_hud(SDL_Renderer* ren, const App& app) {
             "R      reset the level",
             "Tab    pause or resume",
             "Q / E  rotate a held piece (or the wheel)",
+            "RMB    put a held piece back (right mouse button)",
             "N      next level, once solved",
             "C      show contact points",
             "Esc    cancel, close this, or back to the menu",
         };
         const float h = 110.0f + 30.0f * static_cast<float>(lines.size() + std::size(keys));
-        const SDL_FRect r{cx - 420.0f, 110.0f, 840.0f, h};
+        const SDL_FRect r{cx - 480.0f, 110.0f, 960.0f, h};
         draw_panel(ren, r, color::kToolEdge);
         text_centered(ren, cx, r.y + 20.0f, 3.0f, color::kText, "HOW TO PLAY");
         float y = r.y + 66.0f;
@@ -272,7 +273,7 @@ void draw_hud(SDL_Renderer* ren, const App& app) {
         text_centered(ren, cx, r.y + 60.0f, 2.0f, color::kText, line.c_str());
         const bool last = app.index + 1 >= level_count();
         text_centered(ren, cx, r.y + 92.0f, 2.0f, color::kDim,
-                      level.has_setup() ? (last ? "N menu   Space improve it   R reset" : "N next level   Space improve it   R reset")
+                      level.has_setup() ? (last ? "N menu   Space back to setup   R reset" : "N next level   Space back to setup   R reset")
                                         : (last ? "N menu   R play again" : "N next level   R play again"));
     } else if (level.status == Status::Failed) {
         const SDL_FRect r{cx - 360.0f, 104.0f, 720.0f, 112.0f};

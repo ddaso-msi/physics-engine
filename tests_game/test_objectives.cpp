@@ -35,3 +35,47 @@ TEST(count_below_follows_the_simulation) {
     for (int i = 0; i < 120; ++i) w.step(kTimeStep);  // one second of free fall: 4.9 m
     CHECK(count_below(w, ball, 2.0f) == 1);
 }
+
+TEST(inside_tests_the_centre_against_the_region) {
+    World w;
+    const int a = add_disc(w, {2, 2});
+    CHECK(inside(w, a, {1, 1}, {3, 3}));
+    CHECK(!inside(w, a, {2.1f, 1}, {3, 3}));
+    CHECK(!inside(w, a, {1, 1}, {3, 1.9f}));
+    CHECK(inside(w, a, {2, 2}, {2, 2}));  // edges count
+}
+
+TEST(all_slow_needs_every_body_under_both_limits) {
+    World w;
+    const int bodies[] = {add_disc(w, {0, 0}), add_disc(w, {2, 0})};
+    CHECK(all_slow(w, bodies));
+    w.bodies[1].vel = {0.3f, 0};
+    CHECK(!all_slow(w, bodies));
+    CHECK(all_slow(w, bodies, 0.5f));
+    w.bodies[1].vel = {};
+    w.bodies[0].w = 1.0f;  // spinning on the spot is not at rest
+    CHECK(!all_slow(w, bodies));
+    CHECK(all_slow(w, std::span<const int>{}));
+}
+
+TEST(top_of_is_the_highest_point_of_the_outline) {
+    World w;
+    const int disc = add_disc(w, {0, 3});
+    CHECK_NEAR(top_of(w, std::span<const int>{&disc, 1}), 3.2, 1e-5);
+    // A 2 x 0.4 plank stood on end reaches a metre above its centre.
+    const int plank = w.add(Body(Shape::make_polygon(Polygon::box(1.0f, 0.2f)), {5, 4}, kPi / 2));
+    const int both[] = {disc, plank};
+    CHECK_NEAR(top_of(w, both), 5.0, 1e-4);
+    CHECK_NEAR(top_of(w, std::span<const int>{}), kFloorTop, 1e-6);
+}
+
+TEST(hold_needs_an_unbroken_run) {
+    Hold h;
+    for (int i = 0; i < 59; ++i) CHECK(!h.update(true, kTimeStep, 0.5));
+    CHECK(!h.update(false, kTimeStep, 0.5));  // one bad step and the count starts again
+    CHECK(h.held == 0);
+    int steps = 0;
+    while (!h.update(true, kTimeStep, 0.5)) ++steps;
+    CHECK(steps >= 58 && steps <= 60);
+    CHECK(!h.update(false, kTimeStep, 0.5));
+}

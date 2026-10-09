@@ -1,6 +1,10 @@
 #include "levels/levels.hpp"
 
+#include "levels/bridge.hpp"
+#include "levels/chain_reaction.hpp"
 #include "levels/knock_down.hpp"
+#include "levels/pendulum.hpp"
+#include "levels/tower.hpp"
 
 namespace puzzle {
 
@@ -19,7 +23,7 @@ struct Registered {
 const std::vector<Registered>& registry() {
     static const std::vector<Registered> levels = [] {
         std::vector<Registered> r;
-        for (auto make_fn : {&make<KnockDown>}) {
+        for (auto make_fn : {&make<KnockDown>, &make<Bridge>, &make<Pendulum>, &make<ChainReaction>, &make<Tower>}) {
             const std::unique_ptr<Level> sample = make_fn();
             r.push_back({make_fn, {sample->name(), sample->objective()}});
         }
