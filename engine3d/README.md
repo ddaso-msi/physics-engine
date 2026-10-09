@@ -116,8 +116,48 @@ One still survives: dropping only the 1 cm absolute part of the face preference,
 The relative part alone settles the tie that is tested; the absolute part is there for overlaps so shallow
 that 5% of them is below rounding noise, and no test exercises that yet.
 
+## Step 4: the solver and the world (`solver.hpp`, `world.hpp`)
+
+`World::step` finds contacts (every pair, after a bounding-sphere rejection), matches each point to last
+step's by feature id, applies gravity, solves the contacts and moves the bodies. The solver is the 2D one
+carried over: sequential impulses, the accumulated impulse clamped (push, never pull), a bounce fixed up front
+from the arrival speed, Baumgarte push-out of overlap, warm starting. What is 3D-specific:
+
+- **Effective mass with a tensor**: `1/m_eff = 1/mA + 1/mB + dir.((IA^-1 (ra x dir)) x ra) + (same for B)`,
+  with each body's inverse inertia rotated into the world frame once per solve.
+- **Friction in a plane**: two tangent rows per point, and the *length* of the combined friction impulse is
+  limited to `mu * jn` (a circle). Clamping the rows separately makes a square, 41% stronger along diagonals.
+- **A tangent basis that depends only on the normal** (`tangent_basis`), so a steady contact keeps the same
+  tangents and its stored friction impulses can be reused.
+
+Measured against closed forms:
+
+| scene | expected | got |
+|---|---|---|
+| crate on a 20-degree slope, mu 0.1 | `g (sin - mu cos)` = 2.442 m/s^2 | 2.442 |
+| slab sliding along a diagonal, mu 0.4, after 0.5 s | 4.038 m/s, no curving | 4.038, direction kept to 1 part in 10^5 |
+| sliding solid sphere settling into rolling | 5/7 of its speed, `w = v/r` | 5.000 of 7, 10.000 rad/s |
+| sphere rolling down a slope | `5/7 g sin(theta)` = 2.071 m/s^2 | 2.070 |
+| resting crate, sum of its four normal impulses | `m g dt` = 0.08175 | 0.08175 |
+
+Stacking: a tower of 4 and of 10 crates and a 4-3-2-1 pyramid of 30 stand still. Warm starting matters exactly
+as in 2D: a tower of 4 holds on one sweep per step when warm and collapses when cold; a tower of 10 on four
+sweeps likewise.
+
+Tests (26, 85 in total): the table above; elastic exchange along arbitrary lines; momentum and restitution;
+bounce to `e^2 h`; a crate dropped on a corner ends flat and still; one solve conserves total momentum and
+angular momentum for 600 random pairs of tilted bricks (which is what proves the world-frame inertia is used);
+the stored friction impulses on a held crate add up to `m g sin(theta) dt` uphill, for both tangent components;
+friction mixing is symmetric; a body starting inside the floor is pushed out; friction is warm started; a
+tumbling body in a World uses the gyroscopic setting; determinism. 22 deliberate breakages are each caught.
+Six survived at first and each exposed a missing test, which is where the last six of those came from. One
+more was caught only by crashing the test binary: my own tests indexed the contact list after a failed size
+check. That is guarded now, and while chasing it I made the 8-to-4 point reduction safe against NaN positions.
+
+Not here yet: joints, sleeping, continuous collision, a broad phase (it tests all pairs), and any way to look
+at it.
+
 ## Planned next
 
-Step 4: the sequential-impulse solver in 3D (normal row plus two friction rows per point, world-frame inertia,
-warm starting by contact id) and a `World` that steps it, starting with all-pairs broad phase. Then a wireframe
-SDL demo, a 3D broad phase, and GJK/EPA for general convex shapes.
+A wireframe SDL demo so the 3D engine can be seen; then a 3D broad phase, and GJK/EPA for general convex
+shapes. Joints and sleeping can be ported from the 2D designs when wanted.

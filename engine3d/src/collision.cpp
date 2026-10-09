@@ -142,6 +142,14 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
     auto flat = [&](int i) { return phys::Vec2{dot(pts[i].point, u), dot(pts[i].point, v)}; };
     bool used[16] = {};
     int chosen[4];
+    // Every "pick the best" loop below compares with >, which is false for NaN. If a body's position has
+    // gone NaN (a blown-up simulation) no candidate would win, so fall back to any point not yet taken
+    // rather than indexing with -1.
+    auto first_unused = [&] {
+        for (int i = 0; i < count; ++i)
+            if (!used[i]) return i;
+        return 0;
+    };
 
     chosen[0] = 0;
     for (int i = 1; i < count; ++i)
@@ -158,6 +166,7 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
             chosen[1] = i;
         }
     }
+    if (chosen[1] < 0) chosen[1] = first_unused();
     used[chosen[1]] = true;
 
     const phys::Vec2 a = flat(chosen[0]), edge = flat(chosen[1]) - a;
@@ -171,6 +180,7 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
             chosen[2] = i;
         }
     }
+    if (chosen[2] < 0) chosen[2] = first_unused();
     used[chosen[2]] = true;
     const Real third_side = side(chosen[2]);
 
@@ -196,6 +206,8 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
             }
         }
     }
+
+    if (chosen[3] < 0) chosen[3] = first_unused();
 
     ContactPoint kept[4];
     for (int k = 0; k < 4; ++k) kept[k] = pts[chosen[k]];
