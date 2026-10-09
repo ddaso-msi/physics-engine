@@ -32,6 +32,9 @@ ctest --preset debug
 ./build/debug/demo/demo_integrators   # stage 2 spring comparison
 ```
 
+Recording controls in `demo`: `H` hides or shows all on-screen text, `Backspace` reloads the current scene
+from its initial state (solver, sleep, CCD and broad phase toggles are left as set), `Tab` pauses and resumes.
+
 ## Stage 2: integration
 
 `engine/include/phys/integrate.hpp`, `timestep.hpp`. Three ways to advance `x'' = a`, differing only
@@ -215,7 +218,8 @@ sideways fell out of the world and were never colliding again, so most of what i
 The scene now has walls and starts the crates on a non-overlapping grid, and the numbers above replace
 those. The broad-phase-only tables are unaffected: they time bare boxes.
 
-Demo: `F` rains 100 shapes (up to 1500 bodies), `B` switches broad phase, `T` draws the tree's boxes
+Demo: `F` rains 100 shapes in from the top, one every 7 steps into a free slot so nothing starts out
+overlapping (it stops once the pile reaches the top: about 115 shapes in an empty room), `B` switches broad phase, `T` draws the tree's boxes
 (or each body's tight box in the other modes), and the readout shows box tests, candidate pairs and
 confirmed contacts for the last step.
 

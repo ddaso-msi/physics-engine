@@ -16,13 +16,17 @@
 //   cradle: Space lifts the first ball again           rag doll: click drops a rag doll
 //   car: left/right arrows drive (release to brake)   range: click or Space fires a bullet at 70 m/s
 //
+// Recording:
+//   H  hide/show all on-screen text     Backspace  reload the current scene     Tab  pause/resume
+//
 // Joints (stage 8):
 //   J  joint level: rope bridge (hinges), rope pendulum and a crate on a spring (distance joints),
 //      a motorised paddle (hinge + motor), a crate on a tilted rail with end stops (prismatic)
 //   right mouse button: grab any dynamic body and drag it (a mouse joint: a capped soft spring)
 //
 // Broad phase (stage 7):
-//   F  rain 100 random shapes from the top (up to 1500 bodies; watch the box-test count)
+//   F  rain 100 random shapes in from the top, one at a time into free space; stops when the room is
+//      full (watch the box-test count)
 //   B  cycle broad phase: tree / sweep and prune / brute force
 //   T  draw boxes: the tree's padded boxes (tree mode) or each body's tight box (other modes)
 //   G  ghost mode: new shapes ignore other ghosts (collision filtering) but still hit everything else
@@ -103,6 +107,7 @@ void build_level(World& world, size_t& static_count, bool pyramid) {
     world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, 0.25f}, 0));            // floor
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {0.25f, kWorldH * 0.5f}, 0));            // left wall
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {kWorldW - 0.25f, kWorldH * 0.5f}, 0));  // right wall
+    world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, kWorldH + 0.25f}, 0));  // ceiling, just out of view
 
     if (pyramid) {
         static_count = world.bodies.size();
@@ -130,6 +135,7 @@ void build_joint_level(World& world, size_t& static_count) {
     world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, 0.25f}, 0));
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {0.25f, kWorldH * 0.5f}, 0));
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {kWorldW - 0.25f, kWorldH * 0.5f}, 0));
+    world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, kWorldH + 0.25f}, 0));
     static_count = world.bodies.size();
 
     // 1. Rope bridge: 12 planks joined end to end by hinges, both ends pinned to the world. The planks
@@ -254,17 +260,22 @@ const char* scene_name(Scene s) {
     }
 }
 
-// Floor and side walls, like the other levels.
+// Floor, side walls and a ceiling just out of view, like the other levels.
 void add_room(World& world) {
     world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, 0.25f}, 0));
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {0.25f, kWorldH * 0.5f}, 0));
     world.add(make_static_box({0.25f, kWorldH * 0.5f}, {kWorldW - 0.25f, kWorldH * 0.5f}, 0));
+    world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, kWorldH + 0.25f}, 0));
 }
 
 struct Gallery {
     scenes::Cradle cradle;
     scenes::Car car;
     int ragdolls = 0;
+    int rain_pending = 0;  // shapes F has asked for that have not been dropped yet
+    int rain_steps = 0;    // physics steps since the last drop
+    int rain_count = 0;    // shapes dropped so far: picks the next slot and shape
+    int rain_blocked = 0;  // drops in a row that found every slot occupied
 };
 
 void load_scene(Scene scene, World& world, size_t& static_count, Gallery& g) {
@@ -305,6 +316,50 @@ void load_scene(Scene scene, World& world, size_t& static_count, Gallery& g) {
                 world.add(make_body(Kind::Box, {11.5f, 1.0f + static_cast<float>(i) * 1.001f}, 0, kMaterials[1]));  // resting on the floor (top at y = 0.5)
             break;
     }
+}
+
+// Rain (F): one shape every few steps, dropped into one of nine slots along the top of the room. The
+// slots are wide enough that neighbours cannot touch whatever their angle, and a slot is only used when
+// nothing is in it, so a shape never starts out overlapping anything: started overlapping, the contact
+// push-out would fling it away at tens of m/s. A drop that finds every slot occupied (by shapes still
+// falling clear, or by the pile) waits for the next turn; after a second of that the room is full and
+// the rain stops.
+constexpr int kRainSlots = 9;
+constexpr int kRainInterval = 7;   // steps between drops: about 17 shapes a second
+constexpr int kRainPatience = 17;  // blocked drops in a row before giving up: about a second
+
+void rain_step(World& world, Gallery& g, std::uint32_t& seed) {
+    if (g.rain_pending <= 0 || ++g.rain_steps < kRainInterval) return;
+    g.rain_steps = 0;
+    auto random = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24);
+    };
+    const float slot_w = (kWorldW - 1.0f) / kRainSlots;
+    const float reach = 0.71f;  // no shape reaches further than this from its centre (a box's corner)
+    const float y = kWorldH - 0.9f;
+    for (int attempt = 0; attempt < kRainSlots; ++attempt) {
+        const int slot = (g.rain_count * 4 + attempt) % kRainSlots;  // stride 4: neighbours in time are apart in space
+        const float x = 0.5f + slot_w * (static_cast<float>(slot) + 0.5f) + (random() - 0.5f) * 0.2f;
+        const AABB space{{x - reach, y - reach}, {x + reach, y + reach}};
+        bool is_free = true;
+        for (const Body& other : world.bodies)
+            if (overlap(space, compute_aabb(other))) {
+                is_free = false;
+                break;
+            }
+        if (!is_free) continue;
+        const Kind k = (g.rain_count % 3 == 0) ? Kind::Circle : (g.rain_count % 3 == 1) ? Kind::Box : Kind::Hexagon;
+        Body b = make_body(k, {x, y}, random() * 6.0f, kMaterials[1]);
+        b.restitution = 0.1f;
+        b.vel = {0.0f, -3.0f};
+        world.add(b);
+        ++g.rain_count;
+        --g.rain_pending;
+        g.rain_blocked = 0;
+        return;
+    }
+    if (++g.rain_blocked >= kRainPatience) g.rain_pending = 0;  // the pile has reached the top
 }
 
 void fire_bullet(World& world, float y) {
@@ -372,6 +427,8 @@ int main() {
     int spawned = 0;
     int mouse_joint = -1;
     float last_mouse_y = 5.0f;  // index into world.joints of the joint dragging a body, or -1
+    bool show_text = true;
+    bool paused = false;
 
     FixedTimestep timestep(1.0f / 120.0f);
     Uint64 last = SDL_GetTicksNS();
@@ -389,13 +446,21 @@ int main() {
                     case SDLK_4: kind = Kind::Triangle; break;
                     case SDLK_M: material = (material + 1) % (sizeof(kMaterials) / sizeof(kMaterials[0])); break;
                     case SDLK_C: show_contacts = !show_contacts; break;
-                    case SDLK_X: mouse_joint = -1; world.truncate(static_count); break;
+                    case SDLK_X: mouse_joint = -1; gallery.rain_pending = 0; world.truncate(static_count); break;
                     case SDLK_R: mouse_joint = -1; scene = Scene::Sandbox; load_scene(scene, world, static_count, gallery); break;
                     case SDLK_P: mouse_joint = -1; scene = Scene::Pyramid; load_scene(scene, world, static_count, gallery); break;
                     case SDLK_J: mouse_joint = -1; scene = Scene::Joints; load_scene(scene, world, static_count, gallery); break;
                     case SDLK_L:
                         mouse_joint = -1;
                         scene = static_cast<Scene>((static_cast<int>(scene) + 1) % kSceneCount);
+                        load_scene(scene, world, static_count, gallery);
+                        break;
+                    case SDLK_H: show_text = !show_text; break;
+                    case SDLK_TAB: paused = !paused; break;
+                    case SDLK_BACKSPACE:  // the current scene again, from its initial state
+                        mouse_joint = -1;
+                        rain_seed = 1;
+                        spawned = 0;
                         load_scene(scene, world, static_count, gallery);
                         break;
                     case SDLK_S: world.allow_sleep = !world.allow_sleep; break;
@@ -415,17 +480,8 @@ int main() {
                                                                                                 : BroadphaseKind::DynamicTree;
                         break;
                     case SDLK_F:
-                        for (int i = 0; i < 100 && world.bodies.size() < kMaxBodies; ++i) {
-                            rain_seed = rain_seed * 1664525u + 1013904223u;
-                            const float rx = static_cast<float>(rain_seed >> 8) / static_cast<float>(1u << 24);
-                            rain_seed = rain_seed * 1664525u + 1013904223u;
-                            const float ry = static_cast<float>(rain_seed >> 8) / static_cast<float>(1u << 24);
-                            const Kind k = (i % 3 == 0) ? Kind::Circle : (i % 3 == 1) ? Kind::Box : Kind::Hexagon;
-                            Body b = make_body(k, {1.0f + rx * (kWorldW - 2.0f), 4.0f + ry * (kWorldH - 4.5f)},
-                                               rx * 6.0f, kMaterials[1]);
-                            b.restitution = 0.1f;
-                            world.add(b);
-                        }
+                        gallery.rain_pending = std::min(gallery.rain_pending + 100,
+                                                        static_cast<int>(kMaxBodies) - static_cast<int>(world.bodies.size()));
                         break;
                     default: break;
                 }
@@ -475,7 +531,12 @@ int main() {
         Uint64 now = SDL_GetTicksNS();
         Real frame = static_cast<Real>(static_cast<double>(now - last) * 1e-9);
         last = now;
-        timestep.advance(frame, [&](Real dt) { world.step(dt); });
+        // Paused: bank no time, so resuming carries on from here rather than catching up.
+        if (!paused)
+            timestep.advance(frame, [&](Real dt) {
+                rain_step(world, gallery, rain_seed);
+                world.step(dt);
+            });
 
         SDL_SetRenderDrawColor(renderer, 20, 22, 28, 255);
         SDL_RenderClear(renderer);
@@ -517,31 +578,35 @@ int main() {
             }
         }
 
-        SDL_SetRenderDrawColor(renderer, 150, 154, 170, 255);
-        SDL_RenderDebugText(renderer, 70.0f, 12.0f, "click drop | 1-4 shape | M material | W warm start | -/= sweeps | P pyramid | R reset | X clear");
-        const Material& m = kMaterials[material];
-        SDL_RenderDebugTextFormat(renderer, 70.0f, 28.0f, "%s, %s (e=%.2f, mu=%.2f) | bodies %d | contacts %d",
-                                  kind_name(kind), m.name, static_cast<double>(m.restitution),
-                                  static_cast<double>(m.friction), static_cast<int>(world.bodies.size() - static_count),
-                                  static_cast<int>(world.contacts().size()));
-        SDL_RenderDebugTextFormat(renderer, 70.0f, 44.0f, "warm starting: %s | solver sweeps: %d | ghost mode: %s",
-                                  world.solver.warm_starting ? "on" : "OFF", world.solver.iterations,
-                                  ghost_mode ? "on" : "off");
-        const char* bp_name = world.broadphase == BroadphaseKind::DynamicTree      ? "tree"
-                              : world.broadphase == BroadphaseKind::SweepAndPrune ? "sweep and prune"
-                                                                                   : "brute force";
-        SDL_RenderDebugTextFormat(renderer, 70.0f, 60.0f, "broad phase: %s | %llu box tests -> %d candidate pairs -> %d contacts",
-                                  bp_name, static_cast<unsigned long long>(world.stats().broadphase_tests),
-                                  static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
-        SDL_RenderDebugText(renderer, 70.0f, 76.0f, "F rain 100 | B switch broad phase | T show boxes | G ghost mode");
-        SDL_RenderDebugTextFormat(renderer, 70.0f, 92.0f, "J joint level | right-drag grabs a body | joints: %d",
-                                  static_cast<int>(world.joints.size()));
-        SDL_RenderDebugTextFormat(renderer, 70.0f, 108.0f,
-                                  "L scene: %s | S sleep: %s (%d awake, %d islands) | K CCD: %s (%d swept, %d stopped)",
-                                  scene_name(scene), world.allow_sleep ? "on" : "OFF",
-                                  static_cast<int>(world.stats().awake_bodies), static_cast<int>(world.stats().islands),
-                                  world.continuous ? "on" : "OFF", static_cast<int>(world.stats().ccd_swept),
-                                  static_cast<int>(world.stats().ccd_hits));
+        if (show_text) {
+            SDL_SetRenderDrawColor(renderer, 150, 154, 170, 255);
+            SDL_RenderDebugText(renderer, 70.0f, 12.0f, "click drop | 1-4 shape | M material | W warm start | -/= sweeps | P pyramid | R reset | X clear");
+            const Material& m = kMaterials[material];
+            SDL_RenderDebugTextFormat(renderer, 70.0f, 28.0f, "%s, %s (e=%.2f, mu=%.2f) | bodies %d | contacts %d",
+                                      kind_name(kind), m.name, static_cast<double>(m.restitution),
+                                      static_cast<double>(m.friction), static_cast<int>(world.bodies.size() - static_count),
+                                      static_cast<int>(world.contacts().size()));
+            SDL_RenderDebugTextFormat(renderer, 70.0f, 44.0f, "warm starting: %s | solver sweeps: %d | ghost mode: %s",
+                                      world.solver.warm_starting ? "on" : "OFF", world.solver.iterations,
+                                      ghost_mode ? "on" : "off");
+            const char* bp_name = world.broadphase == BroadphaseKind::DynamicTree      ? "tree"
+                                  : world.broadphase == BroadphaseKind::SweepAndPrune ? "sweep and prune"
+                                                                                       : "brute force";
+            SDL_RenderDebugTextFormat(renderer, 70.0f, 60.0f, "broad phase: %s | %llu box tests -> %d candidate pairs -> %d contacts",
+                                      bp_name, static_cast<unsigned long long>(world.stats().broadphase_tests),
+                                      static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
+            SDL_RenderDebugText(renderer, 70.0f, 76.0f, "F rain 100 | B switch broad phase | T show boxes | G ghost mode");
+            SDL_RenderDebugTextFormat(renderer, 70.0f, 92.0f, "J joint level | right-drag grabs a body | joints: %d",
+                                      static_cast<int>(world.joints.size()));
+            SDL_RenderDebugTextFormat(renderer, 70.0f, 108.0f,
+                                      "L scene: %s | S sleep: %s (%d awake, %d islands) | K CCD: %s (%d swept, %d stopped)",
+                                      scene_name(scene), world.allow_sleep ? "on" : "OFF",
+                                      static_cast<int>(world.stats().awake_bodies), static_cast<int>(world.stats().islands),
+                                      world.continuous ? "on" : "OFF", static_cast<int>(world.stats().ccd_swept),
+                                      static_cast<int>(world.stats().ccd_hits));
+            SDL_RenderDebugTextFormat(renderer, 70.0f, 124.0f, "H hide text | Backspace reload scene | Tab pause: %s",
+                                      paused ? "PAUSED" : "running");
+        }
         SDL_RenderPresent(renderer);
     }
 
