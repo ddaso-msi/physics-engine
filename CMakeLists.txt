@@ -19,8 +19,10 @@ add_library(phys STATIC engine/src/shapes.cpp engine/src/body.cpp engine/src/col
 target_include_directories(phys PUBLIC engine/include)
 
 add_subdirectory(scenes)
+add_subdirectory(engine3d)
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(tests3d)
 add_subdirectory(bench)
 
 find_package(SDL3 CONFIG QUIET)
