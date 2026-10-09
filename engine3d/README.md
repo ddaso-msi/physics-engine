@@ -74,8 +74,50 @@ right over (5 to -4.9 rad/s) while spin about the other two axes stays at 5.000.
 body code are each caught; three survived at first (explicit term's sign, torque using the body-frame inertia,
 fixed bodies moving) and got their own tests.
 
+## Step 3: shapes and contact generation (`shapes.hpp`, `collision.hpp`, `src/collision.cpp`)
+
+A body now has a `Shape` (sphere or box). `collide(a, b, manifold)` keeps the 2D contract: the normal points
+from A to B, `depth` is how far B must move along it to separate, and each point sits halfway through the
+overlap. A 3D manifold holds up to **four** points, because two faces meet in a polygon and three or more
+points are needed to stop a box rocking.
+
+- **Sphere vs sphere**: centre distance against the radius sum.
+- **Box vs sphere**: in the box's frame, clamp the sphere's centre to the box to get the nearest point. How
+  many coordinates were clamped says whether that is a face (1), an edge (2) or a corner (3). A centre inside
+  the box leaves through the nearest face.
+- **Box vs box**: the separating axis test over **15 axes**: the 3 face normals of each box and the 9 cross
+  products of one edge direction from each. The 9 are not optional: two cubes turned so an edge of each faces
+  the other are separated by no face normal at all for centre distances between 2.83 and 3.83, only by the
+  axis perpendicular to both edges. The axis of least overlap decides the contact:
+  - a **face** axis: the other box's most opposed face is clipped (Sutherland-Hodgman) against the four side
+    planes of the reference face; the points left behind the reference face are the patch. Up to 8 points come
+    out, reduced to 4: the deepest, the farthest from it, the one making the biggest triangle with those, and
+    the farthest on the other side.
+  - an **edge** axis: one point, midway between the closest points of the two edges.
+
+Two tuning choices, each pinned by a test. A face of A is kept as the reference unless another axis is
+*clearly* shallower (5% and 1 cm): equal cubes stacked have A's face and B's face tied to within rounding, and
+the strict minimum would flip the reference from frame to frame. And the side planes are pushed out 2 mm before
+clipping: with equal boxes the corners of one face lie exactly on the side planes of the other, and without the
+margin each corner flickers between "this corner" and "a point cut by plane k", which are different features
+with different ids. (I checked the 2D engine for the same flicker: in settled stacks 0 of 12000 contact pairs
+changed ids between frames, so it is left alone.)
+
+Tests (20, 59 in total): closed forms for every feature (sphere on a face, edge, corner, inside; a 4-point patch
+whose corners and area are known; an overhang clipped at the edge; separation along each face axis; the edge-edge
+case above, both separated and touching; a corner pressed into a face giving one point; an octagonal overlap
+reduced to four points covering more than 2.0 of its 3.31 area) and properties over thousands of random pairs:
+the reported normal and depth really separate the pair and nothing much smaller does; every contact point lies in
+the overlap; any point sampled inside both bodies implies a collision; the result turns with the scene;
+swapping the bodies flips the normal. Of 24 deliberate breakages, 23 are caught (no edge axes, an unnormalised
+edge axis, each clipping mistake, the wrong incident face, a point off the midpoint, a naive reduction...).
+Two survived at first and showed real gaps, which is how the reference-face and clip-margin tests came about.
+One still survives: dropping only the 1 cm absolute part of the face preference, leaving the 5% relative part.
+The relative part alone settles the tie that is tested; the absolute part is there for overlaps so shallow
+that 5% of them is below rounding noise, and no test exercises that yet.
+
 ## Planned next
 
-Step 3: shapes (sphere, box) and 3D contact generation: sphere cases, then box-box by SAT over 15 axes with face
-clipping and the edge-edge case. Then the sequential-impulse solver in 3D, a wireframe SDL demo, and GJK/EPA for
-general convex shapes.
+Step 4: the sequential-impulse solver in 3D (normal row plus two friction rows per point, world-frame inertia,
+warm starting by contact id) and a `World` that steps it, starting with all-pairs broad phase. Then a wireframe
+SDL demo, a 3D broad phase, and GJK/EPA for general convex shapes.

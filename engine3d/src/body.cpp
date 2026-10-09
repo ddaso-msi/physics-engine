@@ -15,12 +15,16 @@ Body Body::dynamic(Real m, const Mat3& inertia, Vec3 position, Quat orientation)
 
 Body Body::solid_sphere(Real radius, Real density, Vec3 position) {
     const Real m = density * (static_cast<Real>(4) / 3) * kPi * radius * radius * radius;
-    return dynamic(m, sphere_inertia(m, radius), position);
+    Body b = dynamic(m, sphere_inertia(m, radius), position);
+    b.shape = Shape::sphere(radius);
+    return b;
 }
 
 Body Body::solid_box(Vec3 half, Real density, Vec3 position, Quat orientation) {
     const Real m = density * 8 * half.x * half.y * half.z;
-    return dynamic(m, box_inertia(m, half), position, orientation);
+    Body b = dynamic(m, box_inertia(m, half), position, orientation);
+    b.shape = Shape::box(half);
+    return b;
 }
 
 Body Body::fixed(Vec3 position, Quat orientation) {
@@ -28,6 +32,18 @@ Body Body::fixed(Vec3 position, Quat orientation) {
     b.type = BodyType::Static;
     b.pos = position;
     b.q = orientation.normalized();
+    return b;
+}
+
+Body Body::fixed_box(Vec3 half, Vec3 position, Quat orientation) {
+    Body b = fixed(position, orientation);
+    b.shape = Shape::box(half);
+    return b;
+}
+
+Body Body::fixed_sphere(Real radius, Vec3 position) {
+    Body b = fixed(position);
+    b.shape = Shape::sphere(radius);
     return b;
 }
 

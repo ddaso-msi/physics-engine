@@ -11,6 +11,7 @@
 //     body, w must change even with no torque at all:  dw/dt = I^-1 (torque - w x (I w)).
 //     That last term is the gyroscopic term. It is why a thrown book tumbles.
 #include "inertia.hpp"
+#include "shapes.hpp"
 
 namespace phys3d {
 
@@ -26,6 +27,7 @@ enum class Gyroscopic {
 
 struct Body {
     BodyType type = BodyType::Dynamic;
+    Shape shape;  // what it collides as (step 3)
 
     Vec3 pos;
     Quat q;
@@ -47,11 +49,13 @@ struct Body {
 
     // A dynamic body with the given mass and body-frame inertia tensor.
     static Body dynamic(Real mass, const Mat3& inertia_body, Vec3 pos, Quat q = {});
-    // Uniform solid shapes (mass properties only; collision shapes arrive in step 3).
+    // Uniform solid shapes: mass, inertia and collision shape all follow from the geometry.
     static Body solid_sphere(Real radius, Real density, Vec3 pos);
     static Body solid_box(Vec3 half_extents, Real density, Vec3 pos, Quat q = {});
-    // An immovable body.
+    // An immovable body (give it a shape, or use the helpers below).
     static Body fixed(Vec3 pos, Quat q = {});
+    static Body fixed_box(Vec3 half_extents, Vec3 pos, Quat q = {});
+    static Body fixed_sphere(Real radius, Vec3 pos);
 
     Transform transform() const { return {pos, q}; }
     Mat3 inertia_world() const { return to_world_frame(to_mat3(q), inertia_body); }
