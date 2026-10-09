@@ -1,5 +1,5 @@
 #pragma once
-// Stage 5: contact response by sequential impulses.
+// Stage 5: contact response by sequential impulses (extended in stage 8 to solve joints alongside).
 //
 // Every contact point is a constraint on the relative velocity of the two bodies at that point:
 //   normal:   v_n >= bias         (don't approach; bounce if we arrived fast; get out of any overlap)
@@ -8,30 +8,18 @@
 // velocities. Fixing one disturbs its neighbours, so we sweep over all of them several times and the
 // velocities converge. The key to making repeated sweeps correct is to clamp the ACCUMULATED impulse
 // (sum over all sweeps), not each sweep's increment: a contact may push, but never pull.
+//
+// Joints (joints.hpp) are rows of the same kind, so they take part in the same sweeps: each sweep
+// handles the joints first, then the contacts, since keeping a hinge together matters more than
+// resolving a touch.
 #include "body.hpp"
 #include "collision.hpp"
+#include "joints.hpp"
+#include "solver_settings.hpp"
 
 #include <vector>
 
 namespace phys {
-
-struct SolverSettings {
-    int iterations = 10;
-    // Fraction of the remaining overlap removed per second, as a velocity (Baumgarte stabilisation).
-    // Too high adds energy and makes resting bodies jitter; too low lets them sink.
-    Real baumgarte = static_cast<Real>(0.2);
-    // Overlap tolerated without correction. Keeping a sliver of contact stops resting bodies from
-    // alternating between touching and separated every frame, which would lose their contacts.
-    Real slop = static_cast<Real>(0.005);
-    // Closing speeds below this do not bounce (otherwise a body settling on the ground would
-    // chatter forever on ever smaller bounces).
-    Real restitution_threshold = 1;
-    // Start each step from last step's impulses (found by World via the contact point ids) instead
-    // of from zero. A resting contact needs nearly the same impulse every frame, so this begins the
-    // sweeps almost at the answer, and it lets a stack's weight propagate down over a few frames
-    // instead of needing many sweeps in a single one.
-    bool warm_starting = true;
-};
 
 // One colliding pair found by the narrow phase: indices into the world's body array.
 struct ContactPair {
@@ -39,11 +27,12 @@ struct ContactPair {
     Manifold manifold;
 };
 
-// Changes the velocities of the bodies in `contacts` so none are moving into each other, bouncing
-// and applying friction as their materials dictate. `dt` converts overlap into a correcting speed.
-// Reads each point's stored impulses (when warm starting) and writes the final ones back into it.
-void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt,
-                    const SolverSettings& settings);
+// Changes the velocities of the bodies so that no contact is moving into its partner (bouncing and
+// applying friction as the materials dictate) and every joint's constraint holds. `dt` converts
+// position error into a correcting speed. Reads each contact point's and joint row's stored impulses
+// (when warm starting) and writes the final ones back.
+void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, std::vector<Joint>& joints,
+                       Real dt, const SolverSettings& settings);
 
 // Copies solver impulses from last step's contacts to this step's, point by point: a point inherits
 // the impulses of the previous point with the same body pair and the same feature id. Points with no

@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-Status: stages 0-7 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence, broad phase).
+Status: stages 0-8 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence, broad phase, joints).
 
 ## Layout
 
@@ -209,3 +209,66 @@ to improve its quality (for example a periodic bulk rebuild); not done.
 Demo: `F` rains 100 shapes (up to 1500 bodies), `B` switches broad phase, `T` draws the tree's boxes
 (or each body's tight box in the other modes), and the readout shows box tests, candidate pairs and
 confirmed contacts for the last step.
+
+## Stage 8: joints
+
+`engine/include/phys/joints.hpp`. A joint takes away some of two bodies' relative freedom. Every
+joint is turned into a few **scalar velocity rows** in one shared form,
+
+    J v = lin_a . v_a + ang_a w_a + lin_b . v_b + ang_b w_b          (the rate of change of the constrained quantity)
+    lambda = -(J v + bias) / (J M^-1 J^T),      bodies receive the impulse  M^-1 J^T lambda
+
+and the solver neither knows nor cares which joint a row came from. Rows are solved in the same sweeps
+as contacts (joints first), with accumulated-impulse clamping and warm starting. A row can be an
+equality (rigid), one-sided (a limit: accumulated impulse >= 0), capped (a motor: +-max force x dt) or
+soft (a spring-damper in the implicit-Euler form, stable however stiff). Index -1 means "the fixed
+world", so a joint can pin a body to a point.
+
+| joint | rows | extras |
+|---|---|---|
+| Distance | 1 along the line between anchors | rigid, or a spring (`frequency_hz`, `damping_ratio`) |
+| Revolute | 2 (anchors coincide: one per world axis) | angle limit, motor with a torque cap |
+| Prismatic | 2 (stay on the rail, no relative rotation) | translation limit, motor with a force cap |
+| Mouse | 2 (soft, to a target point) | force cap; used for dragging |
+
+Jointed bodies do not collide with each other unless `collide_connected` is set. `World::truncate`
+drops joints that lose a body.
+
+**Position error is not fed back as velocity.** The first version added a Baumgarte term to each row
+(like contacts do) and a hinge chain with a weight hanging on it tore itself apart: even a 16:1 mass
+ratio gave a 1.1 m gap at rest. A warm-started impulse carries the "push" that closed last frame's error
+into the next frame, after the error is gone, so each frame overshoots a little more. The fix is
+Box2D's: rows carry no position bias, and `solve_joint_positions` runs after the bodies move and
+shifts positions and angles directly (never velocities, so it cannot add energy; at most 20 cm or
+8 degrees per correction). That pass must be **Gauss-Seidel**: joints are corrected one at a time, each
+from the poses the previous correction left. My first version built every joint's rows once and applied
+all the fixes, and in a chain the shared link received both fixes and overshot: a settled rope bridge
+that should hold to a millimetre had a 25 cm gap. Contacts still use Baumgarte for overlap; joints do not.
+
+Tests: every row's Jacobian is checked against a numerical derivative of the constraint it represents
+(including a prismatic joint with the bodies slid off the anchor, where one term only shows up), plus
+closed forms: a pinned disc swings with the physical-pendulum period (`T0 (1 + theta^2/16 + ...)`, within
+1%), a spring oscillates at its frequency, damping ratio sets the decay and critical damping does not
+overshoot, a rail box slides at `g sin(theta)` and stops at its limits, motors reach their speed or
+accelerate at `tau / I`, a mouse joint's force cap holds. Position correction is tested not to add energy,
+to ease large errors back rather than teleport, and not to make a chain worse.
+
+Measured (dt = 1/120, 10 sweeps, 4 position passes, 8-link chain of 0.05 kg links, worst hinge gap):
+
+| weight on the end vs a link | hanging at rest | swung at 3 m/s |
+|---|---|---|
+| 16:1 | 2 mm | 3 mm |
+| 79:1 | 10 mm | 17 mm |
+| 314:1 | 40 mm | 64 mm |
+| 1571:1 | 320 mm | torn apart |
+
+Warm starting is essential for hanging loads: at 79:1 with it off the same chain stretches 7 m. A rope
+bridge pinned at both ends and dragged 2.2 m down by a mouse joint keeps every hinge within 5 mm.
+
+Limits of this solver (not fixed): point constraints are two independent scalar rows, not a 2x2 block;
+sequential impulses move information one joint per sweep, so a very heavy swinging end needs more sweeps
+(Box2D's own advice is to keep mass ratios modest); angle limits are only meaningful inside (-pi, pi]; there is
+no joint breaking.
+
+Demo: `J` builds a joint level (rope bridge, rope pendulum, spring crate, motorised paddle, tilted rail
+with end stops). Right-drag grabs any dynamic body with a mouse joint.

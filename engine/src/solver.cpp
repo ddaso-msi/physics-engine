@@ -75,8 +75,13 @@ void transfer_impulses(const std::vector<ContactPair>& previous, std::vector<Con
     }
 }
 
-void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt,
-                    const SolverSettings& settings) {
+void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, std::vector<Joint>& joints,
+                       Real dt, const SolverSettings& settings) {
+    // Joint rows are prepared first but change no velocities, so the contacts below still measure
+    // their arrival speeds from the unmodified velocities.
+    JointSolver joint_solver;
+    joint_solver.prepare(bodies, joints, dt, settings);
+
     std::vector<ContactConstraint> constraints;
     constraints.reserve(contacts.size());
 
@@ -122,6 +127,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
     // built, so no contact's arrival speed (and so its bounce) is measured from velocities that
     // another contact's old impulse has already changed.
     if (settings.warm_starting) {
+        joint_solver.warm_start();
         for (ContactConstraint& c : constraints)
             for (int k = 0; k < c.count; ++k) {
                 const PointConstraint& p = c.points[k];
@@ -130,6 +136,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
     }
 
     for (int sweep = 0; sweep < settings.iterations; ++sweep) {
+        joint_solver.solve_velocity();  // joints first: holding a hinge together outranks a touch
         for (ContactConstraint& c : constraints) {
             // Friction first: it is bounded by the normal impulse, and the normal constraint is the
             // more important one so it gets the last word in each sweep.
@@ -156,6 +163,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
     }
 
     // Remember what we applied, for the next step's warm start.
+    joint_solver.store();
     for (size_t i = 0; i < constraints.size(); ++i) {
         for (int k = 0; k < constraints[i].count; ++k) {
             contacts[i].manifold.points[k].normal_impulse = constraints[i].points[k].normal_impulse;

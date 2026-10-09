@@ -10,6 +10,11 @@
 //   W warm starting on/off    - / =  fewer / more solver sweeps     C show contacts
 //   P pyramid level    R default level    X clear dynamic bodies    Esc quit
 //
+// Joints (stage 8):
+//   J  joint level: rope bridge (hinges), rope pendulum and a crate on a spring (distance joints),
+//      a motorised paddle (hinge + motor), a crate on a tilted rail with end stops (prismatic)
+//   right mouse button: grab any dynamic body and drag it (a mouse joint: a capped soft spring)
+//
 // Broad phase (stage 7):
 //   F  rain 100 random shapes from the top (up to 1500 bodies; watch the box-test count)
 //   B  cycle broad phase: tree / sweep and prune / brute force
@@ -112,6 +117,122 @@ void build_level(World& world, size_t& static_count, bool pyramid) {
     world.add(make_body(Kind::Circle, {2.6f, 8.5f}, 0, kMaterials[0]));
 }
 
+// A level with one of each joint kind. All bodies except the floor and walls are dynamic.
+void build_joint_level(World& world, size_t& static_count) {
+    world.truncate(0);
+    world.add(make_static_box({kWorldW * 0.5f, 0.25f}, {kWorldW * 0.5f, 0.25f}, 0));
+    world.add(make_static_box({0.25f, kWorldH * 0.5f}, {0.25f, kWorldH * 0.5f}, 0));
+    world.add(make_static_box({0.25f, kWorldH * 0.5f}, {kWorldW - 0.25f, kWorldH * 0.5f}, 0));
+    static_count = world.bodies.size();
+
+    // 1. Rope bridge: 12 planks joined end to end by hinges, both ends pinned to the world. The planks
+    //    are laid out along a sagging curve so every hinge starts exactly where it should.
+    {
+        constexpr int kLinks = 12;
+        const Vec2 left{1.0f, 6.4f}, right{7.4f, 6.4f};
+        std::vector<Vec2> pts;
+        for (int i = 0; i <= kLinks; ++i) {
+            const float t = static_cast<float>(i) / kLinks;
+            pts.push_back({left.x + (right.x - left.x) * t, left.y - 1.4f * 4.0f * t * (1.0f - t)});
+        }
+        std::vector<int> link;
+        for (int i = 0; i < kLinks; ++i) {
+            const Vec2 d = pts[static_cast<size_t>(i) + 1] - pts[static_cast<size_t>(i)];
+            Body plank(Shape::make_polygon(Polygon::box(d.length() * 0.5f, 0.07f)),
+                       (pts[static_cast<size_t>(i)] + pts[static_cast<size_t>(i) + 1]) * 0.5f, std::atan2(d.y, d.x));
+            plank.friction = 0.8f;
+            plank.restitution = 0;
+            link.push_back(world.add(plank));
+        }
+        world.add_joint(Joint::revolute(world.bodies, -1, link.front(), pts.front()));
+        for (int i = 1; i < kLinks; ++i)
+            world.add_joint(Joint::revolute(world.bodies, link[static_cast<size_t>(i) - 1], link[static_cast<size_t>(i)],
+                                            pts[static_cast<size_t>(i)]));
+        world.add_joint(Joint::revolute(world.bodies, link.back(), -1, pts.back()));
+    }
+
+    // 2. A rope pendulum: a ball on a rigid distance joint to a point in the world.
+    {
+        const Vec2 pivot{10.2f, 9.9f};
+        const int ball = world.add(make_body(Kind::Circle, pivot + Vec2{3.0f * std::sin(1.0f), -3.0f * std::cos(1.0f)}, 0, kMaterials[0]));
+        world.add_joint(Joint::distance(world.bodies, -1, ball, pivot, world.bodies[static_cast<size_t>(ball)].pos));
+    }
+
+    // 3. A crate on a spring: a soft distance joint, released from a stretch.
+    {
+        const Vec2 anchor{13.6f, 9.9f};
+        const int crate = world.add(make_body(Kind::Box, {13.6f, 7.4f}, 0, kMaterials[1]));
+        Joint spring = Joint::distance(world.bodies, -1, crate, anchor, world.bodies[static_cast<size_t>(crate)].pos);
+        spring.length = 1.8f;
+        spring.frequency_hz = 1.2f;
+        spring.damping_ratio = 0.05f;
+        world.add_joint(spring);
+    }
+
+    // 4. A motorised paddle: a bar on a hinge driven at 1.2 rad/s with a capped torque.
+    {
+        const Vec2 hub{12.6f, 3.4f};
+        Body bar(Shape::make_polygon(Polygon::box(1.5f, 0.12f)), hub, 0.0f);
+        bar.friction = 0.8f;
+        const int idx = world.add(bar);
+        Joint motor = Joint::revolute(world.bodies, -1, idx, hub);
+        motor.enable_motor = true;
+        motor.motor_speed = 1.2f;
+        motor.max_motor = 800.0f;
+        world.add_joint(motor);
+    }
+
+    // 5. A crate on a tilted rail with end stops: a prismatic joint with limits.
+    {
+        const Vec2 start{1.8f, 4.6f}, axis{1.0f, -0.3f};
+        const int crate = world.add(make_body(Kind::Box, start, 0, kMaterials[1]));
+        Joint rail = Joint::prismatic(world.bodies, -1, crate, start, axis);
+        rail.enable_limit = true;
+        rail.lower = 0.0f;
+        rail.upper = 4.5f;
+        world.add_joint(rail);
+    }
+}
+
+void draw_joint(SDL_Renderer* ren, const World& world, const Joint& j) {
+    const Vec2 pa = j.world_anchor_a(world.bodies), pb = j.world_anchor_b(world.bodies);
+    const SDL_FPoint a = to_screen(pa), b = to_screen(pb);
+    auto dot_at = [&](SDL_FPoint p, float r) {
+        const SDL_FRect box{p.x - r, p.y - r, 2 * r, 2 * r};
+        SDL_RenderFillRect(ren, &box);
+    };
+    switch (j.type) {
+        case JointType::Distance:
+            if (j.frequency_hz > 0) SDL_SetRenderDrawColor(ren, 200, 130, 255, 255);  // spring: violet
+            else SDL_SetRenderDrawColor(ren, 255, 170, 80, 255);                      // rod: orange
+            SDL_RenderLine(ren, a.x, a.y, b.x, b.y);
+            dot_at(a, 3);
+            dot_at(b, 3);
+            break;
+        case JointType::Revolute:
+            SDL_SetRenderDrawColor(ren, 90, 220, 230, 255);
+            dot_at(a, 4);
+            break;
+        case JointType::Prismatic: {
+            const Vec2 axis = j.a < 0 ? j.local_axis_a : rotate(world.bodies[static_cast<size_t>(j.a)].q, j.local_axis_a);
+            const Real lo = j.enable_limit ? j.lower : -3, hi = j.enable_limit ? j.upper : 3;
+            const SDL_FPoint from = to_screen(pa + axis * lo), to = to_screen(pa + axis * hi);
+            SDL_SetRenderDrawColor(ren, 110, 200, 120, 255);
+            SDL_RenderLine(ren, from.x, from.y, to.x, to.y);
+            dot_at(from, 3);
+            dot_at(to, 3);
+            break;
+        }
+        case JointType::Mouse: {
+            const SDL_FPoint t = to_screen(j.target);
+            SDL_SetRenderDrawColor(ren, 255, 90, 90, 255);
+            SDL_RenderLine(ren, a.x, a.y, t.x, t.y);
+            dot_at(t, 4);
+            break;
+        }
+    }
+}
+
 void draw_aabb(SDL_Renderer* ren, const AABB& box) {
     const SDL_FPoint lo = to_screen(box.lo), hi = to_screen(box.hi);  // y is flipped: lo.y is the bottom
     const SDL_FRect r{lo.x, hi.y, hi.x - lo.x, lo.y - hi.y};
@@ -166,6 +287,7 @@ int main() {
     bool ghost_mode = false;
     std::uint32_t rain_seed = 1;
     int spawned = 0;
+    int mouse_joint = -1;  // index into world.joints of the joint dragging a body, or -1
 
     FixedTimestep timestep(1.0f / 120.0f);
     Uint64 last = SDL_GetTicksNS();
@@ -183,9 +305,10 @@ int main() {
                     case SDLK_4: kind = Kind::Triangle; break;
                     case SDLK_M: material = (material + 1) % (sizeof(kMaterials) / sizeof(kMaterials[0])); break;
                     case SDLK_C: show_contacts = !show_contacts; break;
-                    case SDLK_X: world.truncate(static_count); break;
-                    case SDLK_R: build_level(world, static_count, false); break;
-                    case SDLK_P: build_level(world, static_count, true); break;
+                    case SDLK_X: mouse_joint = -1; world.truncate(static_count); break;
+                    case SDLK_R: mouse_joint = -1; build_level(world, static_count, false); break;
+                    case SDLK_P: mouse_joint = -1; build_level(world, static_count, true); break;
+                    case SDLK_J: mouse_joint = -1; build_joint_level(world, static_count); break;
                     case SDLK_W: world.solver.warm_starting = !world.solver.warm_starting; break;
                     case SDLK_MINUS: world.solver.iterations = std::max(1, world.solver.iterations - 1); break;
                     case SDLK_EQUALS: world.solver.iterations = std::min(20, world.solver.iterations + 1); break;
@@ -212,6 +335,23 @@ int main() {
                     default: break;
                 }
             }
+            // Right button: drag a body with a mouse joint, created on press and removed on release.
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT && mouse_joint < 0) {
+                const Vec2 p = to_world(e.button.x, e.button.y);
+                for (int i = static_cast<int>(world.bodies.size()) - 1; i >= 0; --i) {
+                    const Body& b = world.bodies[static_cast<size_t>(i)];
+                    if (b.type == BodyType::Dynamic && b.contains(p)) {
+                        mouse_joint = world.add_joint(Joint::mouse(world.bodies, i, p));
+                        break;
+                    }
+                }
+            }
+            if (e.type == SDL_EVENT_MOUSE_MOTION && mouse_joint >= 0 && mouse_joint < static_cast<int>(world.joints.size()))
+                world.joints[static_cast<size_t>(mouse_joint)].target = to_world(e.motion.x, e.motion.y);
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_RIGHT && mouse_joint >= 0) {
+                if (mouse_joint < static_cast<int>(world.joints.size())) world.remove_joint(mouse_joint);
+                mouse_joint = -1;
+            }
             if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                 world.bodies.size() < kMaxBodies) {
                 // A small angle offset per spawn so stacked drops don't land perfectly aligned.
@@ -237,6 +377,8 @@ int main() {
                       b.type == BodyType::Static ? SDL_Color{110, 114, 130, 255}
                       : b.category == 0b10       ? SDL_Color{190, 150, 255, 255}  // ghost
                                                  : SDL_Color{120, 200, 255, 255});
+
+        for (const Joint& j : world.joints) draw_joint(renderer, world, j);
 
         if (show_boxes) {
             if (world.broadphase == BroadphaseKind::DynamicTree) {
@@ -284,6 +426,8 @@ int main() {
                                   bp_name, static_cast<unsigned long long>(world.stats().broadphase_tests),
                                   static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
         SDL_RenderDebugText(renderer, 70.0f, 76.0f, "F rain 100 | B switch broad phase | T show boxes | G ghost mode");
+        SDL_RenderDebugTextFormat(renderer, 70.0f, 92.0f, "J joint level | right-drag grabs a body | joints: %d",
+                                  static_cast<int>(world.joints.size()));
         SDL_RenderPresent(renderer);
     }
 

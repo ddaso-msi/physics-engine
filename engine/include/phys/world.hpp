@@ -4,6 +4,7 @@
 #include "solver.hpp"
 
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 namespace phys {
@@ -27,6 +28,7 @@ public:
     SolverSettings solver;
     BroadphaseKind broadphase = BroadphaseKind::DynamicTree;
     std::vector<Body> bodies;
+    std::vector<Joint> joints;
 
     // Returns the body's index. Indices stay valid as long as bodies are only ever appended.
     int add(const Body& body) {
@@ -34,20 +36,31 @@ public:
         return static_cast<int>(bodies.size()) - 1;
     }
 
+    // Joints connect bodies by index, and are solved together with the contacts every step.
+    int add_joint(const Joint& joint) {
+        joints.push_back(joint);
+        return static_cast<int>(joints.size()) - 1;
+    }
+    // Removes one joint. Later joints shift down by one index.
+    void remove_joint(int index) { joints.erase(joints.begin() + index); }
+
     // Keeps only the first `count` bodies (e.g. to delete everything added after the level was built).
     // Use this rather than resizing `bodies` directly: it also drops the remembered contacts, whose
-    // body indices would otherwise point at the wrong bodies and warm start them with stale impulses.
+    // body indices would otherwise point at the wrong bodies and warm start them with stale impulses,
+    // and the joints that referred to a removed body.
     void truncate(size_t count) {
         bodies.resize(count);
         contacts_.clear();
+        const int limit = static_cast<int>(count);
+        std::erase_if(joints, [&](const Joint& j) { return j.a >= limit || j.b >= limit; });
     }
 
     // One step:
     //   1. broad phase: AABB overlaps give candidate pairs; filters drop pairs that must not collide
-    //   2. narrow phase on the candidates, then match each contact point to last step's (by id) so it
-    //      can inherit that step's impulse
+    //   2. narrow phase on the candidates (skipping jointed pairs), then match each contact point to
+    //      last step's (by id) so it can inherit that step's impulse
     //   3. apply gravity/forces to velocities
-    //   4. change velocities so contacts stop approaching (bounce + friction), warm started
+    //   4. change velocities so joints hold and contacts stop approaching (bounce + friction), warm started
     //   5. move bodies using those velocities
     void step(Real dt);
 
@@ -64,6 +77,7 @@ private:
     TreeBroadphase tree_;
     std::vector<AABB> boxes_;                // scratch, reused every step
     std::vector<std::uint8_t> immovable_;
+    std::unordered_set<std::uint64_t> no_collide_;  // body pairs joined by a joint that forbids their collision
 };
 
 }  // namespace phys
