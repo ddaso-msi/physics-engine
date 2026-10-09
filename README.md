@@ -18,6 +18,8 @@ demo/     SDL3 debug renderer and scenes
 tests/    dependency-free test runner
 scenes/   library of gallery scenes (Newton's cradle, rag doll, car) shared by the demo and the tests
 bench/    broad phase / World::step timings (build the release preset)
+game/     Physics Puzzle Lab: a puzzle game built on the engine (see below)
+tests_game/  tests that play the game's levels headless
 ```
 
 ## Build
@@ -34,6 +36,53 @@ ctest --preset debug
 
 Recording controls in `demo`: `H` hides or shows all on-screen text, `Backspace` reloads the current scene
 from its initial state (solver, sleep, CCD and broad phase toggles are left as set), `Tab` pauses and resumes.
+
+## Physics Puzzle Lab
+
+A small puzzle game on top of the 2D engine: five levels, each a physical problem you solve by
+experiment. Nothing is scripted; every outcome is whatever `World::step` produces.
+
+```bash
+cmake --preset release && cmake --build --preset release
+./build/release/game/puzzle_lab
+```
+
+| # | Level | What you do | Solved when |
+|---|---|---|---|
+| 1 | Knock It Down | aim with the mouse, fire three balls | every block is below the platform |
+| 2 | Bridge Builder | join connection points with up to 12 hinged beams | the car reaches the far cliff without falling |
+| 3 | Pendulum Smash | choose the release angle of a weight on a rod | the crate comes to rest in the bin |
+| 4 | Chain Reaction | place three spare dominoes in a gap | the chain tips the last ball into the bin |
+| 5 | Impossible Tower | stack seven mismatched pieces | the top stays above 4.5 m for 5 s, then rests |
+
+Controls: `Space` run / back to setup, `R` reset, `Tab` pause, `Q`/`E` or the wheel rotate a held piece,
+right click puts it back, `N` next level, `H` help, `C` contact points, `Esc` cancel then menu.
+
+How it is put together:
+
+- `game/` is a library (`phys_game`) with no SDL in it. `level.hpp` has the `Level` base class: a setup
+  phase (the world is built but frozen) and a run phase (fixed 1/120 s steps), plus what a level tells
+  the app to draw (a role per body and a list of marks). `objectives.hpp` has the win conditions as
+  plain questions about the world; `pieces.hpp` the rules for placing loose pieces.
+- A level never edits a world in place. Bodies are identified by index and the engine has no way to
+  remove one, so every change (moving a piece, adding a beam, reset) rebuilds a fresh `World` from the
+  level's definition and the player's setup. Reset is therefore exact, and a replay of the same setup
+  gives the same result.
+- `game/app/` is the SDL3 program: input, drawing, the menu and status bar. It only talks to `Level`.
+- `tests_game/` plays each level without a window: winning and losing setups, shot and beam limits,
+  reset, and replays.
+
+Two things the levels lean on that are worth knowing about the engine. Continuous collision only covers
+static bodies, so level 1 caps the launch speed below a block's width per step. And there are hinges but
+no welds: in level 2 a row of hinged beams keeps its shape only where it is triangulated back to fixed
+points, which is why the smallest bridge that stands has ten beams.
+
+The game can also be driven by a script, which is how it is checked without a display:
+
+```bash
+SDL_VIDEODRIVER=dummy ./build/release/game/puzzle_lab --level 3 --press 5.1 4.7 --drag 2.5 6.5 \
+    --release 2.5 6.5 --key run --steps 600 --capture out.bmp
+```
 
 ## Stage 2: integration
 
