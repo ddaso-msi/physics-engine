@@ -522,6 +522,79 @@ In the demo capsules fall in scene 3 and a log rolls down the slope in scene 4 (
 Not checked: the 2D sweep. It uses a different rule for a body in contact (a cap on the overlap depth) and
 passed 300000 harsh shots, but none of those shapes was as thin for its length as these capsules.
 
+## Step 12: a convex hull builder (`hull.hpp`, `src/hull.cpp`)
+
+GJK and EPA are content with a convex shape as a cloud of points. A contact patch is not: to rest on a face
+a shape has to know it has one. `build_hull(points, count, hull)` turns the cloud into the corners that
+matter and the flat polygons between them, each with an outward normal and its corners in order. Points
+inside, on a face or along an edge are dropped. A cloud that encloses no volume is refused.
+
+The method is EPA's polytope growing, run to completion (Quickhull without the bookkeeping that makes it
+fast on big inputs):
+1. Start with a tetrahedron of four of the points, spread as widely as possible.
+2. Take the point farthest outside the current surface. If none is outside by more than the tolerance, stop.
+3. Remove every triangle that point can see, spreading out from one across shared edges. Close the hole
+   with a fan of triangles from its rim to the point. Go to 2.
+4. Merge triangles that lie in one plane into polygons, so a cube is six squares and not twelve triangles.
+   Faces are grown from a seed triangle, and a neighbour joins if its corners lie in the SEED's plane.
+5. A point left on only two faces is a point along an edge, not a corner; drop it.
+
+The tolerance, a hundred-thousandth of the cloud's size, decides two things only: how far outside a point
+must be to be worth adding, and how level two triangles must be to be one face.
+
+**What went wrong on the way, all found by stress and none by the first tests.** The first version built
+every solid I knew the answer for and then failed on one very flat cloud in forty.
+- *Visibility with a tolerance is wrong whichever way it leans.* "Can this point see this triangle" has to
+  be answered for triangles the point is almost level with. Count level as seen, and triangles the point is
+  slightly BELOW are removed too: the surface shrinks away from corners it already had. Count level as not
+  seen, and the triangle that closes the hole can cut under a corner by far more than the tolerance (the
+  error is levered by how close the point is to the rim). Use zero, in single precision, and rounding decides
+  for each triangle of one flat face separately: some go, some stay, and new triangles are laid on top of
+  old ones.
+- *The fix is to make the question exact.* The builder does its own arithmetic in double precision (input
+  and output stay in the engine's `Real`). Single precision cannot even place the plane of a thin triangle
+  to within the tolerance: one a hundredth as wide as it is long has a normal good to a part in 100000.
+  In double, "in front of" means in front of, the removed patch is always a disc with one rim, and the
+  tolerance goes back to deciding only what is worth adding and what counts as flat.
+- *Merging neighbours pairwise lets a face creep round a curve*, each step within tolerance. Hence the seed.
+- *A plane computed from positions far from the origin* (Newell's sum of cross products) loses everything
+  to cancellation; the face now simply takes its seed triangle's plane.
+
+**Then, deleting.** After the move to double precision, several pieces written for the single-precision
+version did nothing in 200000 stress clouds, and went:
+- special handling for a point exactly in line with a rim edge. It cannot arise: such a point is at least
+  twice as far outside every triangle as the edge's far corner ever was, so farthest-first brings it in
+  before that corner exists;
+- a fallback for clouds whose points all share one x (such a cloud is flat, and refused anyway);
+- remembering which points were already corners; growing faces from their largest triangle; requiring that
+  a joined triangle face the same way as its seed (I could not construct a case, and a hand-built thin wedge
+  showed why: a corner is only added if it is more than the tolerance outside, so a solid cannot have two
+  opposite faces within the tolerance of each other); a fallback margin and a rim check in step 3.
+What is left as a net: a triangle with no area, a merged face that is not convex, fewer than four faces, or
+`V - E + F != 2` all refuse the build. Only the convexity refusal has ever been seen to fire since
+(12 flat clouds in 150000, kept as a test); the others overlap each other and breaking any one of them
+alone changes nothing, so they are untested as individuals.
+
+**Checked how.** An audit that knows nothing of how the hull was built: closed (every edge has its twin),
+every face flat, convex and wound counter-clockwise, no input point in front of any face, every vertex an
+input point on at least three faces, `V - E + F = 2`, no two neighbouring faces squarely coplanar. A stress
+of a million clouds of eight kinds (random, on a sphere, random lattice points, prisms, boxes with points
+on their faces, pyramids, slabs a thousand times wider than thick, clouds with repeats) at scales 0.01, 1
+and 100, half rotated, a fifth far from the origin: every hull built passes; 1074 are refused, all flat
+lattice subsets or slabs. And one independent opinion: the faces enclose exactly what GJK says the raw
+points enclose.
+
+Tests (12, 219 in total): the cube (and a 1 x 2 x 3 box: six rectangles at the right distances); a cube
+buried in interior, on-face, on-edge and repeated points, in 30 orders; a 4 x 3 x 5 lattice, rotated 40
+ways, that must come out as 8 corners and 6 faces; tetrahedron, octahedron, icosahedron; prisms of 3 to 12
+sides keeping their ends as single faces; points on a sphere; 400 random clouds whose hull must reach
+exactly as far as the cloud in every direction; the comparison with GJK; independence of point order; 600
+flat clouds and the 12 dented ones; clouds with no volume. Cost: 14 microseconds for 8 points, 0.25 ms for
+100, 24 ms for 1000 (it is quadratic and more; fine for shapes, not for point-cloud scans).
+
+Not done: nothing uses the faces yet. Hulls still collide through their point cloud and get a one-point
+contact.
+
 ## Planned next
 
-A convex hull builder, so that hulls know their faces and can rest on them; then hulls as bodies.
+Face contacts for hulls in `collide_convex`, then hulls as bodies (mass and inertia of a polyhedron).
