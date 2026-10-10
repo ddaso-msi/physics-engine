@@ -320,6 +320,7 @@ TEST(resting_box_carries_the_impulse_that_cancels_gravity) {
     run(w, 240, dt);
 
     CHECK(w.contacts().size() == 1);
+    if (w.contacts().size() != 1) return;
     const Manifold& m = w.contacts()[0].manifold;
     CHECK(m.count == 2);
     // Every step gravity adds m g dt of downward velocity; the contact impulses must remove exactly that.
