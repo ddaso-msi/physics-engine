@@ -35,8 +35,6 @@ struct UnionFind {
     }
 };
 
-Real wrap_angle(Real a) { return a - 2 * kPi * std::round(a / (2 * kPi)); }
-
 // Farthest a body's shape reaches from its centre of mass.
 Real bounding_radius(const Body& b) {
     if (b.shape.type == Shape::Type::Circle) return b.shape.circle.radius;
@@ -168,7 +166,7 @@ void World::step(Real dt) {
     // 7. Continuous collision.
     stats_.ccd_swept = 0;
     stats_.ccd_hits = 0;
-    if (continuous) continuous_collision();
+    if (continuous) continuous_collision(dt);
 
     // 8. Sleep. A body is "still" while it is slower than both thresholds; an island sleeps when its
     //    most restless member has been still long enough.
@@ -214,13 +212,16 @@ void World::step(Real dt) {
 //     contact point. So it may sink no deeper than a quarter of its inscribed radius in one step; the
 //     sweep stops it where it reaches that depth. A quarter radius is shallower than the way out on
 //     either side of any wall, so the contact still pushes it back out the side it came in from.
-void World::continuous_collision() {
+void World::continuous_collision(Real dt) {
     const size_t n = bodies.size();
     for (size_t i = 0; i < n; ++i) {
         Body& body = bodies[i];
         if (!body.is_active()) continue;
         const Vec2 p0 = prev_pos_[i], p1 = body.pos;
-        const Real a0 = prev_angle_[i], da = wrap_angle(body.angle - a0);
+        // The turn it actually made this step. NOT the difference of the two stored angles: those are kept
+        // wrapped into (-pi, pi], so beyond half a revolution per step their difference is the short way
+        // round, the wrong way, and the sweep would test poses the body never passed through.
+        const Real a0 = prev_angle_[i], da = body.w * dt;
         const Real radius = body.inscribed_radius();
         const Real reach = bounding_radius(body);
         const Real motion = distance(p0, p1) + std::fabs(da) * reach;  // how far its outline travels

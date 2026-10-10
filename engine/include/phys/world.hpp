@@ -97,7 +97,7 @@ public:
     const DynamicTree& broadphase_tree() const { return tree_.tree(); }
 
 private:
-    void continuous_collision();
+    void continuous_collision(Real dt);
 
     std::vector<ContactPair> contacts_;
     StepStats stats_;

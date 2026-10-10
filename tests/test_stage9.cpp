@@ -346,6 +346,65 @@ TEST(continuous_collision_works_for_any_shot) {
     CHECK(through_without > 90);    // and without it most shots do: the test is not vacuous
 }
 
+namespace {
+
+// One of a family of much nastier shots: plates as thin as 1:10, walls from 1 to 20 cm, up to 200 m/s and
+// 80 rad/s. `kind` 0 is a disc, 1 a box, 2 a triangle whose centre of mass is off to one side.
+World harsh_shot(int trial) {
+    Lcg rng;
+    rng.s = static_cast<std::uint32_t>(trial) * 104729u + 11;
+    const Real speed = rng.range(20, 200), vy = rng.range(-40, 40), spin = rng.range(-80, 80), y = rng.range(2, 8);
+    const Real thick = rng.range(0.01f, 0.2f), size = rng.range(0.06f, 0.4f), aspect = rng.range(0.1f, 1.6f);
+    const Real angle = rng.range(-3, 3);
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    add_static_box(w, {thick * 0.5f, 60}, {8, 5});
+    const int kind = trial % 3;
+    const Vec2 corners[3] = {{0, 0}, {size * 2, 0}, {size * 0.5f, size * 2 * aspect}};
+    Body bullet = kind == 0   ? Body(Shape::make_circle(size), {3, y}, 0)
+                  : kind == 1 ? Body(Shape::make_polygon(Polygon::box(size, size * aspect)), {3, y}, angle)
+                              : Body(Shape::make_polygon(*Polygon::from_points(corners)), {3, y}, angle);
+    bullet.vel = {speed, vy};
+    bullet.w = spin;
+    w.add(bullet);
+    return w;
+}
+
+}  // namespace
+
+// Three ways to get this wrong: let the body through, hold it against the wall for ever with its speed
+// intact, or hand it energy. An earlier version of the sweep managed the second, one shot in ten.
+TEST(continuous_collision_neither_leaks_nor_traps_nor_adds_energy) {
+    int through = 0, trapped = 0, gained = 0;
+    for (int trial = 0; trial < 600; ++trial) {
+        World w = harsh_shot(trial);
+        const Real e0 = w.bodies[1].kinetic_energy();
+        Real peak = 0;
+        for (int s = 0; s < 240; ++s) {
+            w.step(1.0f / 120.0f);
+            peak = std::max(peak, w.bodies[1].kinetic_energy());
+        }
+        const Body& b = w.bodies[1];
+        through += b.pos.x > 8.3f;
+        trapped += b.pos.x < 8.0f && b.vel.x >= 0.5f;  // still this side, two seconds on, still heading in
+        gained += peak > e0 * 1.001f;
+    }
+    CHECK(through == 0);
+    CHECK(trapped == 0);
+    CHECK(gained == 0);
+}
+
+// The shot that exposed the trap. An off-centre hit turns the box's speed into spin: 407 rad/s, more than
+// half a revolution per step. The sweep used to work out the turn from the two stored angles, which are
+// wrapped, so it swept the box round the wrong way and put it back in the same pose every step.
+TEST(a_box_set_spinning_by_its_impact_still_comes_back_off_the_wall) {
+    World w = harsh_shot(1);
+    for (int i = 0; i < 240; ++i) w.step(1.0f / 120.0f);
+    CHECK(w.bodies[1].pos.x < 8.0f);
+    CHECK(w.bodies[1].vel.x < 0);
+}
+
 TEST(a_fast_fall_onto_a_thin_floor_does_not_tunnel) {
     World w;
     Body floor(Shape::make_polygon(Polygon::box(20, 0.02f)), {0, 0}, 0, BodyType::Static);

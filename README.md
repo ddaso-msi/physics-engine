@@ -322,6 +322,18 @@ the narrow phase's exact question, argument order included: at razor-thin overla
 `collide(b, a)` can disagree through rounding. Stress test: 3000 random shots (discs, boxes, triangles, up
 to 200 m/s, walls 1 to 10 cm thick, spin up to 30 rad/s): 64% tunnel without the pass, none with it.
 
+*Correction:* that stress test checked only that nothing got through, and so missed a bug that stopped
+bodies too well. A harsher run (20000 shots, plates down to 1:10, spin up to 80 rad/s) that also checked
+energy and whether the body ever left the wall found one shot in ten hanging against the wall for ever,
+still moving into it at full speed. The sweep took the body's turn during the step from its start and end
+angles, and angles are stored wrapped into (-pi, pi]. An off-centre impact can leave a box spinning at
+400 rad/s, over half a revolution per step, and then that difference is the short way round: the sweep
+tested poses the box never passed through and put it back in the same pose every step. The turn is now
+`w * dt`. After the fix: 100000 shots at each of 60, 120 and 240 Hz, none through, none trapped, none
+gaining energy. I first blamed the depth cap and rewrote it (measuring depth by the deepest point's travel,
+as the 3D engine does, and adding an impulse at the moment of impact); with the angle fixed, removing each
+of those changes made no difference to any run, so they are not in the code.
+
 **Gallery** (`scenes/`, demo key `L`): Newton's cradle (rigid ropes, elastic frictionless balls; lifting one
 ball sends one out the far side to 99.6% of its height with the middle three staying put, and two balls
 send two), a rag doll (ten bodies, nine limited hinges, no self-collision), a car (a prismatic slide with
