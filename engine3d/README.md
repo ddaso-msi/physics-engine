@@ -332,6 +332,76 @@ hinge axes in yellow. Checked by headless renders only.
 Not done: a slider (prismatic) joint, a fixed (weld) joint, cone and twist limits for the ball joint, a mouse
 joint. Hinge limits must lie inside (-pi, pi).
 
+## Step 9: GJK and EPA (`gjk.hpp`, `src/gjk.cpp`)
+
+Distance and penetration between any two convex shapes, from one function, `closest(a, b)`. It is not used
+by the world yet: this step is the two algorithms on their own, checked against known answers.
+
+The box and sphere code knows its shapes' geometry. These algorithms know one thing about a shape, its
+**support function**: which of your points is farthest in direction `d`? Both work on the Minkowski
+difference `A - B` (every point of A minus every point of B), which is never built, only sampled: its
+farthest point along `d` is A's farthest along `d` minus B's farthest along `-d`. A and B overlap exactly
+when `A - B` contains the origin.
+
+- **GJK** finds the point of `A - B` nearest the origin. It keeps a simplex of up to four samples, finds
+  the simplex's nearest point to the origin (a closest-point-on-segment/triangle/tetrahedron problem), and
+  samples again in the direction of the origin from there. It stops when the new sample is no nearer than
+  the simplex already gets (apart), or when the simplex holds the origin (overlapping).
+- **EPA** takes over when they overlap. It grows GJK's tetrahedron outward, always pushing on the face
+  nearest the origin, until that face cannot move: it is then on the surface of `A - B`, and its normal and
+  distance are the direction and depth of the shortest way apart.
+- A shape is a **core plus a rounding radius**: a sphere is a point, a capsule a segment. The algorithms run
+  on the cores. If the cores are apart, the answer for the rounded shapes is the cores' distance less the two
+  radii, exact, with no EPA even when the rounded shapes overlap.
+
+Shapes so far: sphere, capsule, box, the convex hull of a point set, and any of those rounded. The result is
+a signed distance (negative = depth), a normal from a to b, and the closest (or deepest) point of each.
+
+**How it was checked.** Known answers first (spheres, box faces, a corner over a face, two crossed edges,
+capsules, a small box inside a big one, identical boxes in one place). Then against the code that knows the
+shapes: 3000 box pairs against a plain 15-axis SAT (worst difference under 1 mm) and 2000 sphere-box pairs
+against `collide()`. Then an **audit that uses only support functions**, so it applies to every pairing: the
+two points lie on their shapes; they are `distance` apart along the normal; flattened onto the normal the
+shapes are apart by exactly `distance`; and for an overlapping pair no nearby direction gets out sooner.
+
+A stress program runs that audit on two million random pairs: five kinds of shape, at scales 0.01, 1 and 50,
+some 300 units from the origin, one pair in thirteen slid into exact contact first. All pass but one, where
+the deepest points are about 5 mm out (the depth and normal are right); the code detects that case and
+returns `converged = false`. Timing, release build: 0.2 microseconds for a separated pair, 1.4 when EPA runs.
+GJK averages 4.7 iterations (worst 22), EPA 4.8 (worst 22).
+
+**What the stress runs found that the unit tests had not.** The first version passed 18 of 19 tests at once.
+Then:
+1. *Deepest points wrong on flat sides.* A flat side of `A - B` (two box faces together) is covered by
+   several triangles in one plane, and EPA's "nearest face" picks any of them; only one contains the point
+   wanted. The deepest points now come from a second GJK run on the pair pulled just clear along the normal.
+2. *Overlap reported for shapes a hair apart.* Rounding let a nearly flat tetrahedron pass the "origin is
+   inside" test. A tetrahedron flatter than a ten-thousandth of its size now encloses nothing.
+3. *A normal a third of a degree out* for capsules whose axes nearly cross: the closest points were a tiny
+   difference of large numbers. For a triangle simplex the normal is now the triangle's own.
+4. *A pair in exact contact reported 14 cm apart.* See the next paragraph.
+
+**A mistake of method, corrected.** Following my rule (if breaking some code changes no test and no stress
+result, delete it), I deleted five pieces after a 500000-pair stress showed them idle. Two of them were not
+idle. The stress used random pairs, and random pairs are never exactly touching, which is exactly when those
+two pieces act. With touching pairs added, about 1% of them failed. One piece went back: GJK treats anything
+closer than a ten-thousandth of the shapes' size as touching and hands over to EPA, because single precision
+cannot give a direction for a separation that small (so distances under 0.1 mm on a 1 m object read as zero).
+The other, a guard for zero-area triangles, went back and was measured again with touching pairs, still
+changed nothing in two million, and is deleted. The rule stands, but the stress has to contain the cases the
+code is for.
+
+Tests (28, 172 in total): the known answers; the comparisons with SAT and `collide()`; the audit on 6000
+random pairs, 4000 pairs slid into exact contact and 6000 a hair either side of it; order of the shapes,
+position in the world and scale; the closest-point routines against a slow independent version in all seven
+regions of a triangle; a ball centred exactly on a box's corner, edge or face; a rod ending exactly on a box
+corner; the capsule and deepest-point regressions; iteration counts. Of about 40 deliberate breakages of the
+final code, all are caught except one line: the "still overlapping after being pulled clear" half of the
+`converged` check has never been seen to happen, so nothing tests it.
+
+Not done: wiring this into `collide()` and the world, which needs contact MANIFOLDS (GJK/EPA give one point;
+a box resting on a face needs four) and the new shapes as bodies with mass and inertia.
+
 ## Planned next
 
-GJK/EPA for general convex shapes.
+Contact manifolds from GJK/EPA, then capsules and convex hulls as bodies in the world.
