@@ -57,6 +57,7 @@ struct ContactConstraint {
     Vec3 normal, tangent[2];
     Real friction = 0;
     int count = 0;
+    size_t source = 0;  // index of the ContactPair this came from (dormant pairs are skipped)
     PointConstraint points[Manifold::kMaxPoints];
 };
 
@@ -83,8 +84,11 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
     std::vector<ContactConstraint> constraints;
     constraints.reserve(contacts.size());
 
-    for (const ContactPair& pair : contacts) {
+    for (size_t source = 0; source < contacts.size(); ++source) {
+        const ContactPair& pair = contacts[source];
+        if (pair.dormant) continue;
         ContactConstraint c;
+        c.source = source;
         c.a = &bodies[static_cast<size_t>(pair.a)];
         c.b = &bodies[static_cast<size_t>(pair.b)];
         c.inv_ia = c.a->inv_inertia_world();
@@ -166,7 +170,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
 
     for (size_t i = 0; i < constraints.size(); ++i)
         for (int k = 0; k < constraints[i].count; ++k) {
-            ContactPoint& cp = contacts[i].manifold.points[k];
+            ContactPoint& cp = contacts[constraints[i].source].manifold.points[k];
             cp.normal_impulse = constraints[i].points[k].normal_impulse;
             cp.tangent_impulse[0] = constraints[i].points[k].tangent_impulse[0];
             cp.tangent_impulse[1] = constraints[i].points[k].tangent_impulse[1];

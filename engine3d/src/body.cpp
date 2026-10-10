@@ -1,5 +1,7 @@
 #include <phys3d/body.hpp>
 
+#include <cmath>
+
 namespace phys3d {
 
 Body Body::dynamic(Real m, const Mat3& inertia, Vec3 position, Quat orientation) {
@@ -72,7 +74,16 @@ void Body::integrate_velocity(Real dt, Vec3 gravity, Gyroscopic mode) {
             const Vec3 iw = inertia_body * wb;
             const Vec3 f = cross(wb, iw) * dt;
             const Mat3 jac = inertia_body + (Mat3::skew(wb) * inertia_body - Mat3::skew(iw)) * dt;
-            w = rot * (wb - jac.inverse() * f);
+            Vec3 wb1 = wb - jac.inverse() * f;
+
+            // One Newton iteration is accurate while the body turns a modest angle per step. At extreme
+            // spins (several radians per step, as after a hard corner impact) it can overshoot badly and
+            // hand back far more spin than it was given. The gyroscopic term is a torque perpendicular to w:
+            // it does no work, so the true answer has exactly the rotational energy we started with. Never
+            // let the step exceed that; scale the result back onto it if it does.
+            const Real energy0 = dot(wb, iw), energy1 = dot(wb1, inertia_body * wb1);
+            if (!(energy1 <= energy0)) wb1 = energy1 > 0 && std::isfinite(energy1) ? wb1 * std::sqrt(energy0 / energy1) : wb;
+            w = rot * wb1;
         }
     }
     force = {};

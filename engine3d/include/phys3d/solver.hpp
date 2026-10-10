@@ -25,6 +25,9 @@ using phys::SolverSettings;
 struct ContactPair {
     int a = 0, b = 0;
     Manifold manifold;
+    // Both bodies are asleep (or static): the contact is remembered, with its impulses, so it can warm
+    // start the pile when it wakes, but it takes no part in solving.
+    bool dormant = false;
 };
 
 // Changes the bodies' velocities so no contact is closing, with bounce and friction from their materials.

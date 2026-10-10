@@ -6,7 +6,7 @@
 //   1 tower   2 pyramid   3 mixed rain   4 slope (friction and rolling)   5 tumble (zero gravity)
 //   Space  shoot a ball from the camera   F  drop 10 more random bodies
 //   W  warm starting on/off   - / =  fewer / more solver sweeps   G  gyroscopic term: implicit / explicit / off
-//   B  broad phase: tree / brute force
+//   B  broad phase: tree / brute force   S  sleeping on/off (sleepers are drawn dim)   K  continuous collision on/off
 //   C  show contacts   H  hide/show text   Tab  pause   Backspace or R  reload the scene   Esc  quit
 //
 // Headless capture (for checking a scene without a window):
@@ -215,7 +215,9 @@ void draw_world(SDL_Renderer* ren, const World& w, const Camera& cam, bool show_
     paint.grid();
     for (size_t i = 1; i < w.bodies.size(); ++i) {  // body 0 is the floor, shown by the grid
         const Body& b = w.bodies[i];
-        const SDL_Color c = b.type == BodyType::Static ? SDL_Color{150, 154, 170, 255} : SDL_Color{120, 200, 255, 255};
+        const SDL_Color c = b.type == BodyType::Static ? SDL_Color{150, 154, 170, 255}
+                            : !b.awake                   ? SDL_Color{70, 100, 130, 255}  // asleep
+                                                         : SDL_Color{120, 200, 255, 255};
         if (b.shape.type == Shape::Type::Box) paint.box(b, c);
         else paint.sphere(b, c);
     }
@@ -288,6 +290,8 @@ int main(int argc, char** argv) {
                                                                                        : Gyroscopic::Implicit;
                         break;
                     case SDLK_F: add_random_bodies(world, rng, 10, 6.0f); break;
+                    case SDLK_S: world.allow_sleep = !world.allow_sleep; break;
+                    case SDLK_K: world.continuous = !world.continuous; break;
                     case SDLK_B:
                         world.broadphase = world.broadphase == BroadphaseKind::DynamicTree ? BroadphaseKind::BruteForce : BroadphaseKind::DynamicTree;
                         break;
@@ -332,6 +336,10 @@ int main(int argc, char** argv) {
                                       world.broadphase == BroadphaseKind::DynamicTree ? "tree" : "brute force",
                                       static_cast<unsigned long long>(world.stats().broadphase_tests),
                                       static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
+            SDL_RenderDebugTextFormat(renderer, 16, 76, "S sleep: %s (%d awake, %d islands) | K continuous collision: %s (%d swept, %d stopped)",
+                                      world.allow_sleep ? "on" : "OFF", static_cast<int>(world.stats().awake_bodies),
+                                      static_cast<int>(world.stats().islands), world.continuous ? "on" : "OFF",
+                                      static_cast<int>(world.stats().ccd_swept), static_cast<int>(world.stats().ccd_hits));
         }
         if (capture) {
             SDL_Surface* surf = SDL_RenderReadPixels(renderer, nullptr);

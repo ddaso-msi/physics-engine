@@ -64,6 +64,13 @@ and `I_world` turns with the body, so `w` has to change even with no torque: `dw
 So the default is stable but dissipative: a tumbling body slowly spins down, faster at coarse steps. That is
 the usual trade (it is Catto's formulation) and is far better than gaining energy, but it is not conservation.
 
+*Correction (found in step 7):* "never rises" was only true at moderate spin. The implicit step is a single
+Newton iteration, and when a body turns several radians per step (hundreds of rad/s, as after a hard corner
+impact) that iteration can overshoot badly: a stress test saw one step hand back 780 times the energy it was
+given. A gyroscopic torque does no work, so `integrate_velocity` now compares the rotational energy before and
+after and scales the result back if it rose. With that guard the statement holds at any spin (tested up to
+900 rad/s).
+
 Tests (16, 39 in total): mass and inertia of the solid shapes; a fixed body ignores everything, including a
 velocity written into it; free fall; force at a point; an impulse changes linear momentum by `j` and angular
 momentum about the origin by `hit x j` in any orientation; a torque on a turned body meets the world-frame
@@ -216,7 +223,52 @@ sub-quadratically; the simulation is identical with either broad phase. 13 delib
 The demo's body cap is now 1200, `B` switches the broad phase, and the readout shows box tests, candidate
 pairs and confirmed contacts.
 
+## Step 7: sleeping and continuous collision (ported from the 2D engine)
+
+**Sleeping** works as in 2D: islands (bodies linked by contacts) are found with union-find, the floor links
+nothing, and an island sleeps when its most restless body has been slower than 0.01 m/s and 0.035 rad/s for
+half a second. Sleeping bodies are not integrated, solved or collided with each other; their contacts are
+kept dormant with their impulses, so a sleeping pyramid that is poked wakes warm started (crates below the
+poked one move under 2 cm). An awake body touching a sleeping island wakes it; so does setting a velocity,
+force or torque. Moving a sleeper by hand needs `World::wake`.
+
+**Continuous collision** against static bodies also follows 2D: a body that moves or turns more than half
+its inscribed radius in a step is swept at poses no further apart than that radius; a body that was clear is
+placed just inside the first thing it touches so the solver responds next step.
+
+A 3000-shot stress run (spheres and boxes 8 to 40 cm, 30 to 200 m/s, spin up to 30 rad/s per axis, walls 1 to
+10 cm thick) found three things the 150-shot test had not:
+
+1. **8 shots got through with the sweep on.** For a body already in contact I had ported the 2D rule "may
+   sink no deeper than a quarter radius", measured by the overlap depth `collide()` reports. For a plate
+   thinner than the wall that depth stops growing as the plate slices in, then measures the way out the far
+   side. The rule now follows the body's farthest point along the direction it entered by, and stops it when
+   that point has advanced a quarter radius.
+2. **Some shots left a collision with far more energy than they arrived with** (one, x780). That was not the
+   sweep or the solver but the implicit gyroscopic step overshooting at extreme spin; see the correction
+   under step 2.
+3. **One shot appeared to deadlock**, pinned at the wall spinning at 500 rad/s. I first added an impulse to
+   break it; measuring afterwards showed the impulse changed nothing (the stall had been the gyroscopic
+   overshoot again), so it was removed.
+
+After the fixes: 0 of 3000 get through (59% do without the sweep), none is left pinned at the wall, none ever
+exceeds its starting energy, and every shot has turned back within 23 steps. The ten worst shots are kept as a
+regression test, along with the first 400.
+
+Tests (17, 116 in total): the 2D sleeping tests in 3D (asleep means bit-for-bit still; an island sleeps and
+wakes as one; thresholds on speed and on spin; velocity, force and torque wake; a teleport needs `wake`;
+sleeping does not change where a pyramid ends up); a fast ball and 150 random shots against a thin wall with
+the sweep on and off; a fast fall onto a thin floor; a fast spinner stopped at a post it only crosses between
+steps; slow bodies left bit-for-bit alone; and the regressions above. Of 20 deliberate breakages 19 are
+caught; the one that survives (placing a capped body at the other end of a bracket 1/65536 of a step wide) is
+equivalent. Two pieces of code that mutants showed to be doing nothing were deleted rather than kept: the
+impulse above, and a "take the short way round" quaternion negation that was wrong for turns over half a
+revolution.
+
+In the demo `S` toggles sleeping (sleepers are drawn dim), `K` toggles the sweep, and the readout shows awake
+bodies, islands, and how many bodies were swept and stopped.
+
 ## Planned next
 
-GJK/EPA for general convex shapes, and joints, sleeping and continuous collision ported from the 2D designs
-(a fast shot can still tunnel through a thin body in 3D).
+Joints in 3D (ball-and-socket, hinge, distance, with the 2D position-correction pass), then GJK/EPA for
+general convex shapes.

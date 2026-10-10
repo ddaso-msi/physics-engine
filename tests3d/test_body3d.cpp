@@ -306,3 +306,28 @@ TEST(spin_about_the_intermediate_axis_flips_over) {
     CHECK(lowest_spin_about(2) > 4.9);   // largest moment: stable
     CHECK(lowest_spin_about(1) < -4.0);  // the middle one: it turned completely over
 }
+
+// The gyroscopic term is a torque at right angles to w, so it can do no work. At extreme spin, several
+// radians per step, the single Newton iteration of the implicit step overshoots, and without a guard it
+// hands back far more rotational energy than it was given (a stress test saw x780 in one step).
+TEST(gyroscopic_step_never_adds_energy_even_at_extreme_spin) {
+    Lcg rng;
+    rng.s = 2024;
+    double worst = 0;
+    int slowed = 0;
+    for (int trial = 0; trial < 400; ++trial) {
+        Body b = Body::solid_box({rng.range(0.03f, 0.4f), rng.range(0.03f, 0.4f), rng.range(0.03f, 0.4f)}, 1, {0, 0, 0}, rng.rotation());
+        b.w = rng.vec(1).normalized() * rng.range(50, 900);  // up to 7.5 rad per step
+        const double start = double(b.kinetic_energy());
+        double peak = 0;
+        for (int i = 0; i < 60; ++i) {
+            b.integrate(1.0f / 120.0f, {}, Gyroscopic::Implicit);
+            peak = std::max(peak, double(b.kinetic_energy()));
+        }
+        worst = std::max(worst, peak / start);
+        slowed += double(b.kinetic_energy()) < 0.2 * start;
+        CHECK(std::isfinite(b.w.x) && std::isfinite(b.w.y) && std::isfinite(b.w.z));
+    }
+    CHECK(worst <= 1.001);
+    CHECK(slowed < 400);  // it is a guard, not a brake: not every spin is killed
+}

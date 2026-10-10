@@ -13,6 +13,8 @@
 #include "inertia.hpp"
 #include "shapes.hpp"
 
+#include <algorithm>
+
 namespace phys3d {
 
 enum class BodyType { Static, Dynamic };
@@ -45,6 +47,12 @@ struct Body {
     Real restitution = static_cast<Real>(0.2);
     Real friction = static_cast<Real>(0.5);
 
+    // Sleeping (see World::step). A body whose whole island has been nearly still for long enough stops
+    // being simulated until something disturbs it. Do not move a sleeping body by hand without wake().
+    bool awake = true;
+    bool allow_sleep = true;  // false: this body keeps its whole island awake
+    Real sleep_time = 0;      // how long it has been nearly still
+
     Body() = default;
 
     // A dynamic body with the given mass and body-frame inertia tensor.
@@ -58,6 +66,21 @@ struct Body {
     static Body fixed_sphere(Real radius, Vec3 pos);
 
     Transform transform() const { return {pos, q}; }
+
+    // Dynamic and not asleep: the bodies that actually get simulated.
+    bool is_active() const { return type == BodyType::Dynamic && awake; }
+    void wake() {
+        awake = true;
+        sleep_time = 0;
+    }
+    // Radius of the largest sphere around the centre of mass that fits inside the shape, and of the
+    // smallest one that contains it. A body that moves less than the first in a step cannot have passed
+    // straight through anything; everything it can touch lies within the second.
+    Real inscribed_radius() const {
+        return shape.type == Shape::Type::Sphere ? shape.radius
+                                                 : std::min({shape.half_extents.x, shape.half_extents.y, shape.half_extents.z});
+    }
+    Real bounding_radius() const { return shape.type == Shape::Type::Sphere ? shape.radius : shape.half_extents.length(); }
     Mat3 inertia_world() const { return to_world_frame(to_mat3(q), inertia_body); }
     Mat3 inv_inertia_world() const { return to_world_frame(to_mat3(q), inv_inertia_body); }
 
