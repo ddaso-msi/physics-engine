@@ -503,8 +503,12 @@ TEST(a_ragdoll_falls_folds_within_its_limits_and_comes_to_rest) {
     CHECK(worst_limit_violation < 0.05);   // elbows, knees, neck all stay inside their limits
     CHECK(lowest > 0.05);                  // nothing sank into the floor
     CHECK(asleep_at > 0 && asleep_at < 8 * 120);  // it lies still and goes to sleep
-    // It ended up lying down: the head is near the floor.
-    CHECK(w.bodies[static_cast<size_t>(d.head)].pos.y < 0.6f);
+    // It ended up lying down: the torso (which stood 1.74 up, 1.1 tall) is low and tipped over. The head
+    // does not reach the floor, because the neck's limit holds it up off a torso propped on its arms.
+    const Body& torso = w.bodies[static_cast<size_t>(d.torso)];
+    CHECK(torso.pos.y < 0.6f);
+    CHECK(std::fabs(torso.angle) > 1.0f);
+    CHECK(w.bodies[static_cast<size_t>(d.head)].pos.y < 0.9f);
 }
 
 TEST(a_car_settles_on_its_springs_drives_and_brakes) {

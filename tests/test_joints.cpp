@@ -238,6 +238,31 @@ TEST(revolute_limit_stops_the_swing) {
     CHECK(min_angle > -0.56);  // and the swing back did not break the other limit
 }
 
+// An arm pinned at one end falls onto its lower limit and must come to rest THERE, pinned. The position
+// pass used to correct all of a joint's rows from one measurement: closing the pin turned the arm off the
+// limit, turning it back opened the pin, and the two overshot against each other for ever. The arm sat a
+// few degrees above its stop with the pin pulled apart, and since it was "not at the limit" nothing ever
+// stopped its speed building up. Over half of these cases failed.
+TEST(an_arm_dropped_onto_a_revolute_limit_rests_exactly_on_it) {
+    for (Real hz : {60.0f, 120.0f, 240.0f})
+        for (Real half_length : {0.2f, 0.8f, 1.5f})
+            for (Real half_thickness : {0.02f, 0.2f})
+                for (Real lower : {-0.2f, -0.5f, -1.2f}) {
+                    World w;
+                    w.allow_sleep = false;
+                    w.add(Body(Shape::make_polygon(Polygon::box(half_length, half_thickness)), {half_length, 0}, 0));
+                    Joint hinge = Joint::revolute(w.bodies, -1, 0, {0, 0});
+                    hinge.enable_limit = true;
+                    hinge.lower = lower;
+                    hinge.upper = 0.25f;
+                    w.add_joint(hinge);
+                    run(w, static_cast<int>(hz) * 4, 1 / hz);
+                    CHECK_NEAR(w.bodies[0].angle, lower, 1e-3);
+                    CHECK(std::fabs(w.bodies[0].w) < 1e-3f);
+                    CHECK(distance(w.joints[0].world_anchor_a(w.bodies), w.joints[0].world_anchor_b(w.bodies)) < 1e-4f);
+                }
+}
+
 TEST(revolute_motor_spins_to_speed_and_respects_its_torque_limit) {
     // A free wheel pinned at its centre. With plenty of torque it reaches the target speed...
     {

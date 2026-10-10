@@ -280,9 +280,14 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
     JointSolver solver;
     for (int pass = 0; pass < settings.joint_position_iterations; ++pass) {
         for (Joint& joint : joints) {
-            // Rows for this one joint, built from the poses as they are right now.
-            solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
-            for (JointRow& r : solver.rows_mutable()) {
+            // One ROW at a time, each measured from the poses as they are right now. A joint's rows share
+            // its bodies, so correcting one changes the error of the others: closing a hinge's pin turns
+            // the body, which changes its angle, and turning it back to a limit moves the pin. Corrected
+            // all together from one measurement they overshoot against each other and never settle.
+            for (size_t k = 0;; ++k) {
+                solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
+                if (k >= solver.rows().size()) break;
+                JointRow& r = solver.rows_mutable()[k];
                 if (r.error == 0 || r.mass <= 0) continue;
                 const bool angular_only = r.lin_a.length_sq() == 0 && r.lin_b.length_sq() == 0;
                 const Real limit = angular_only ? kMaxAngularCorrection : kMaxLinearCorrection;
