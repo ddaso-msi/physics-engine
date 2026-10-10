@@ -41,8 +41,11 @@ Convex Convex::hull(const Vec3* pts, int n, Vec3 p, Quat orientation, Real r) {
     return c;
 }
 Convex Convex::of(const Body& body) {
-    return body.shape.type == Shape::Type::Sphere ? sphere(body.shape.radius, body.pos)
-                                                  : box(body.shape.half_extents, body.pos, body.q);
+    switch (body.shape.type) {
+        case Shape::Type::Sphere: return sphere(body.shape.radius, body.pos);
+        case Shape::Type::Capsule: return capsule(body.shape.half_length, body.shape.radius, body.pos, body.q);
+        default: return box(body.shape.half_extents, body.pos, body.q);
+    }
 }
 
 Vec3 Convex::core_support(Vec3 d) const {

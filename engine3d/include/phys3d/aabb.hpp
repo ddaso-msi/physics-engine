@@ -42,9 +42,12 @@ inline Real surface_area(const AABB& a) {
 // sum of the box's three half-extents, each scaled by how much its axis leans along that world axis:
 // extent_i = sum_j |R_ij| h_j.
 inline AABB compute_aabb(const Body& b) {
-    if (b.shape.type == Shape::Type::Sphere) {
+    if (b.shape.type != Shape::Type::Box) {
+        // A sphere, or a capsule: the box around its axis (a single point for a sphere), grown by the radius.
         const Vec3 r{b.shape.radius, b.shape.radius, b.shape.radius};
-        return {b.pos - r, b.pos + r};
+        const Vec3 h = rotate(b.q, {0, b.shape.half_length, 0});
+        const Vec3 reach{std::fabs(h.x), std::fabs(h.y), std::fabs(h.z)};
+        return {b.pos - reach - r, b.pos + reach + r};
     }
     const Mat3 rot = to_mat3(b.q);
     const Vec3 h = b.shape.half_extents;

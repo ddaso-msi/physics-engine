@@ -2,6 +2,7 @@
 #include <phys3d/inertia.hpp>
 
 #include <cstdint>
+#include <utility>
 
 using namespace phys3d;
 
@@ -91,6 +92,40 @@ TEST(inertia_formulas_agree_with_numerical_integration) {
     CHECK_NEAR(sphere_numeric.at(0, 0), sphere_exact.at(0, 0), 0.02 * sphere_exact.at(0, 0));  // a few % from the staircase surface
     CHECK_NEAR(sphere_numeric.at(1, 1), sphere_exact.at(1, 1), 0.02 * sphere_exact.at(1, 1));
     CHECK_NEAR(sphere_numeric.at(0, 1), 0, 0.01);
+}
+
+TEST(capsule_inertia_agrees_with_numerical_integration) {
+    for (const auto& [half_length, radius] : {std::pair<Real, Real>{0.8f, 0.3f}, {0.2f, 0.5f}, {1.5f, 0.1f}}) {
+        const Real mass = 3, reach = half_length + radius;
+        auto inside = [&](Vec3 p) {
+            const Real y = p.y < -half_length ? -half_length : p.y > half_length ? half_length : p.y;
+            return (p - Vec3{0, y, 0}).length_sq() <= radius * radius;
+        };
+        const Mat3 slow = integrate_inertia(mass, {-radius, -reach, -radius}, {radius, reach, radius}, {0, 0, 0}, 120, inside);
+        CHECK_MAT(capsule_inertia(mass, half_length, radius), slow, 0.004 * slow.at(0, 0));
+        // And the volume, the same way: the share of the grid's box that is inside.
+        int in = 0;
+        const int n = 100;
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                for (int k = 0; k < n; ++k)
+                    in += inside({radius * (2 * (i + 0.5f) / n - 1), reach * (2 * (j + 0.5f) / n - 1), radius * (2 * (k + 0.5f) / n - 1)});
+        const double box_volume = 8.0 * radius * reach * radius;
+        CHECK_NEAR(capsule_volume(half_length, radius), box_volume * in / (double(n) * n * n), 0.005 * box_volume);
+    }
+}
+
+TEST(capsule_inertia_has_the_right_limits) {
+    // No cylinder at all: a sphere.
+    CHECK_MAT(capsule_inertia(2, 0, 0.7f), sphere_inertia(2, 0.7f), 1e-5);
+    // Very thin: a rod of length 2h, m L^2 / 12 = m h^2 / 3 across and nothing about its axis.
+    const Mat3 rod = capsule_inertia(2, 1.5f, 1e-3f);
+    CHECK_NEAR(rod.at(0, 0), 2 * 1.5 * 1.5 / 3, 3e-3);
+    CHECK_NEAR(rod.at(2, 2), rod.at(0, 0), 1e-6);
+    CHECK(rod.at(1, 1) < 1e-5f);
+    // Harder to turn end over end than to spin about its axis.
+    const Mat3 c = capsule_inertia(1, 0.5f, 0.25f);
+    CHECK(c.at(0, 0) > c.at(1, 1));
 }
 
 TEST(parallel_axis_theorem) {

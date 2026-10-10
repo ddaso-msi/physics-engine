@@ -60,10 +60,13 @@ struct Body {
     // Uniform solid shapes: mass, inertia and collision shape all follow from the geometry.
     static Body solid_sphere(Real radius, Real density, Vec3 pos);
     static Body solid_box(Vec3 half_extents, Real density, Vec3 pos, Quat q = {});
+    // The capsule's axis is the body's own y axis.
+    static Body solid_capsule(Real half_length, Real radius, Real density, Vec3 pos, Quat q = {});
     // An immovable body (give it a shape, or use the helpers below).
     static Body fixed(Vec3 pos, Quat q = {});
     static Body fixed_box(Vec3 half_extents, Vec3 pos, Quat q = {});
     static Body fixed_sphere(Real radius, Vec3 pos);
+    static Body fixed_capsule(Real half_length, Real radius, Vec3 pos, Quat q = {});
 
     Transform transform() const { return {pos, q}; }
 
@@ -77,10 +80,11 @@ struct Body {
     // smallest one that contains it. A body that moves less than the first in a step cannot have passed
     // straight through anything; everything it can touch lies within the second.
     Real inscribed_radius() const {
-        return shape.type == Shape::Type::Sphere ? shape.radius
-                                                 : std::min({shape.half_extents.x, shape.half_extents.y, shape.half_extents.z});
+        return shape.type == Shape::Type::Box ? std::min({shape.half_extents.x, shape.half_extents.y, shape.half_extents.z}) : shape.radius;
     }
-    Real bounding_radius() const { return shape.type == Shape::Type::Sphere ? shape.radius : shape.half_extents.length(); }
+    Real bounding_radius() const {
+        return shape.type == Shape::Type::Box ? shape.half_extents.length() : shape.radius + shape.half_length;  // (a sphere's half_length is 0)
+    }
     Mat3 inertia_world() const { return to_world_frame(to_mat3(q), inertia_body); }
     Mat3 inv_inertia_world() const { return to_world_frame(to_mat3(q), inv_inertia_body); }
 

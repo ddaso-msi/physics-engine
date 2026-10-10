@@ -29,6 +29,13 @@ Body Body::solid_box(Vec3 half, Real density, Vec3 position, Quat orientation) {
     return b;
 }
 
+Body Body::solid_capsule(Real half_length, Real radius, Real density, Vec3 position, Quat orientation) {
+    const Real m = density * capsule_volume(half_length, radius);
+    Body b = dynamic(m, capsule_inertia(m, half_length, radius), position, orientation);
+    b.shape = Shape::capsule(half_length, radius);
+    return b;
+}
+
 Body Body::fixed(Vec3 position, Quat orientation) {
     Body b;
     b.type = BodyType::Static;
@@ -46,6 +53,12 @@ Body Body::fixed_box(Vec3 half, Vec3 position, Quat orientation) {
 Body Body::fixed_sphere(Real radius, Vec3 position) {
     Body b = fixed(position);
     b.shape = Shape::sphere(radius);
+    return b;
+}
+
+Body Body::fixed_capsule(Real half_length, Real radius, Vec3 position, Quat orientation) {
+    Body b = fixed(position, orientation);
+    b.shape = Shape::capsule(half_length, radius);
     return b;
 }
 

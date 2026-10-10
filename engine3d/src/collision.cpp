@@ -564,7 +564,10 @@ bool collide(const Body& a, const Body& b, Manifold& out) {
     using Type = Shape::Type;
     Manifold m;
     bool hit;
-    if (a.shape.type == Type::Sphere && b.shape.type == Type::Sphere) {
+    if (a.shape.type == Type::Capsule || b.shape.type == Type::Capsule) {
+        // No routine was written for capsules: they go through GJK and EPA.
+        hit = collide_convex(Convex::of(a), Convex::of(b), m);
+    } else if (a.shape.type == Type::Sphere && b.shape.type == Type::Sphere) {
         hit = collide_spheres(a, b, m);
     } else if (a.shape.type == Type::Box && b.shape.type == Type::Sphere) {
         hit = collide_box_sphere(a, b, m);
@@ -581,6 +584,10 @@ bool collide(const Body& a, const Body& b, Manifold& out) {
 bool contains(const Body& body, Vec3 world_point) {
     const Vec3 local = inv_rotate(body.q, world_point - body.pos);
     if (body.shape.type == Shape::Type::Sphere) return local.length_sq() <= body.shape.radius * body.shape.radius;
+    if (body.shape.type == Shape::Type::Capsule) {
+        const Vec3 nearest_on_axis{0, std::clamp(local.y, -body.shape.half_length, body.shape.half_length), 0};
+        return (local - nearest_on_axis).length_sq() <= body.shape.radius * body.shape.radius;
+    }
     const Vec3 h = body.shape.half_extents;
     return std::fabs(local.x) <= h.x && std::fabs(local.y) <= h.y && std::fabs(local.z) <= h.z;
 }

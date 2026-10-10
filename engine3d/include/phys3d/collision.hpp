@@ -37,7 +37,7 @@ struct Manifold {
 };
 
 // True and fills `out` when the bodies' shapes overlap; `out` is untouched otherwise. Handles every
-// pairing of sphere and box.
+// pairing of sphere, box and capsule (capsules by way of collide_convex below).
 bool collide(const Body& a, const Body& b, Manifold& out);
 
 // The same contract, for any two convex shapes, built on GJK and EPA (gjk.hpp) instead of on knowledge of

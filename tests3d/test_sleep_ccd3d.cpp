@@ -388,7 +388,8 @@ World stress_shot(int trial) {
 // spinning at 500 rad/s it was rewound to the same pose every step and never lost its speed into the wall.
 // 2014 and 666 came out of one step with hundreds of times their energy (the gyroscopic step overshooting).
 TEST(shots_that_once_got_through_or_blew_up_now_bounce_off) {
-    for (int trial : {418, 492, 834, 1020, 2466, 2014, 2980, 666, 608, 2402}) {
+    // 1802 stopped dead against the wall when a body held by the sweep lost its approach speed without a bounce.
+    for (int trial : {418, 492, 834, 1020, 2466, 2014, 2980, 666, 608, 2402, 1802}) {
         World w = stress_shot(trial);
         const double start_energy = double(w.bodies[1].kinetic_energy());
         double peak = 0;

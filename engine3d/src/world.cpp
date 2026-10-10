@@ -40,16 +40,6 @@ std::uint64_t pair_key(int a, int b) {
 
 Quat blend(const Quat& q0, const Quat& q1, Real t) { return (q0 * (1 - t) + q1 * t).normalized(); }
 
-// The point of the body's shape farthest along unit direction d, if the body were at (pos, q).
-Vec3 support_point(const Body& b, Vec3 pos, const Quat& q, Vec3 d) {
-    if (b.shape.type == Shape::Type::Sphere) return pos + d * b.shape.radius;
-    const Mat3 r = to_mat3(q);
-    const Vec3 axis[3] = {r.cx, r.cy, r.cz};
-    Vec3 p = pos;
-    for (int k = 0; k < 3; ++k) p += axis[k] * (dot(axis[k], d) < 0 ? -b.shape.half_extents[k] : b.shape.half_extents[k]);
-    return p;
-}
-
 }  // namespace
 
 void World::step(Real dt) {
@@ -197,11 +187,17 @@ void World::step(Real dt) {
 //   - Starting clear of the wall: the first overlapping sample brackets the time of impact, bisection
 //     refines it, and the body is put at the overlapping end, just barely inside, so next step's solver sees
 //     a contact and responds.
-//   - Starting already in contact: its deepest point may advance no more than a quarter of the inscribed
-//     radius further into the wall in one step. "Deeper" is measured along the direction it entered by,
-//     as the travel of its farthest point that way. (Capping the overlap depth collide() reports does not
-//     work: for a plate thinner than the wall that depth stops growing as the plate slices in, and starts
-//     measuring the way out the far side.)
+//   - Starting already in contact: its centre may advance no more than a quarter of the inscribed radius
+//     further into the wall in one step, measured along the direction it entered by. If it is held there,
+//     the part of its velocity that was carrying it in is reversed like any bounce.
+//
+// That second rule is the third version. Capping the overlap depth collide() reports does not work: for a
+// plate thinner than the wall the depth stops growing as the plate slices in. Following the body's farthest
+// point along the entry direction does not work either: a thin capsule that arrives end-on and turns side-on
+// as it goes in reaches no deeper with its farthest point (the end swings back as fast as the body advances)
+// while all of it passes through. And holding the pose without touching the velocity is not enough: when
+// the one contact point the solver has is swinging AWAY from the wall (a long body spinning hard), the solver
+// does nothing, and the body crept in a quarter radius per step until it was through.
 void World::continuous_collision() {
     const size_t n = bodies.size();
     for (size_t i = 0; i < n; ++i) {
@@ -235,6 +231,9 @@ void World::continuous_collision() {
 
         const int steps = std::clamp(static_cast<int>(std::ceil(motion / radius)), 1, 512);
         Real earliest = 2;  // > 1 means "no hit"
+        bool held = false;  // the earliest stop was a body already in contact reaching its cap...
+        Vec3 held_into;     // ...moving this way into the wall
+        Real held_bounce = 0;
         for (size_t s = 0; s < n; ++s) {
             const Body& wall = bodies[s];
             if (s == i || wall.inv_mass != 0) continue;  // only static bodies
@@ -262,31 +261,33 @@ void World::continuous_collision() {
                     depth_at(mid, s, &touching);
                     (touching ? hi : lo) = mid;
                 }
-                earliest = std::min(earliest, hi);
+                if (hi < earliest) earliest = hi, held = false;
             } else {
-                // Already touching. d points from the body into the wall; follow the body's farthest point
-                // along d and stop it once that point has gone a further depth_cap in.
+                // Already touching. d points from the body into the wall; the centre travels in a straight
+                // line, so the fraction of the step at which it has gone a further depth_cap that way is a
+                // simple ratio.
                 const Vec3 d = i < s ? start.normal : -start.normal;
-                const Real start_reach = dot(support_point(body, p0, q0, d), d);
-                auto advance = [&](Real t) {
-                    return dot(support_point(body, p0 + (p1 - p0) * t, blend(q0, q1, t), d), d) - start_reach;
-                };
-                int first = -1;
-                for (int k = 1; k <= steps && first < 0; ++k)
-                    if (advance(static_cast<Real>(k) / static_cast<Real>(steps)) > depth_cap) first = k;
-                if (first < 0) continue;
-                Real lo = static_cast<Real>(first - 1) / static_cast<Real>(steps), hi = static_cast<Real>(first) / static_cast<Real>(steps);
-                for (int it = 0; it < 16; ++it) {
-                    const Real mid = (lo + hi) * static_cast<Real>(0.5);
-                    (advance(mid) > depth_cap ? hi : lo) = mid;
+                const Real travel = dot(p1 - p0, d);
+                if (travel <= depth_cap) continue;
+                const Real stop = depth_cap / travel;
+                if (stop < earliest) {
+                    earliest = stop;
+                    held = true;
+                    held_into = d;
+                    held_bounce = std::max(body.restitution, wall.restitution);
                 }
-                earliest = std::min(earliest, lo);  // the last pose still within the cap
             }
         }
         if (earliest <= 1) {
             body.pos = p0 + (p1 - p0) * earliest;
             body.q = blend(q0, q1, earliest);
             ++stats_.ccd_hits;
+            if (held) {
+                // Held at its cap: it is being driven into the wall and the contact solver did nothing
+                // about it this step, or it would not be here. Treat it as the impact it is.
+                const Real closing = dot(body.vel, held_into);
+                if (closing > 0) body.vel -= held_into * ((1 + (closing > solver.restitution_threshold ? held_bounce : Real(0))) * closing);
+            }
         }
     }
 }

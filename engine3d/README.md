@@ -251,6 +251,10 @@ A 3000-shot stress run (spheres and boxes 8 to 40 cm, 30 to 200 m/s, spin up to 
    break it; measuring afterwards showed the impulse changed nothing (the stall had been the gyroscopic
    overshoot again), so it was removed.
 
+*Correction (step 11):* points 1 and 3 were both wrong in the end. The farthest-point rule has a hole of its
+own, and the impulse I removed as doing nothing is needed; neither showed until capsules gave the stress
+long thin bodies. See step 11 for the rule as it now stands.
+
 After the fixes: 0 of 3000 get through (59% do without the sweep), none is left pinned at the wall, none ever
 exceeds its starting energy, and every shot has turned back within 23 steps. The ten worst shots are kept as a
 regression test, along with the first 400.
@@ -455,6 +459,69 @@ Not done, and the reason hulls come next: a hull here is a cloud of points with 
 it offers only its farthest vertex and gets a one-point contact. A hull resting on a face would rock.
 Capsules have full manifolds but are not bodies yet (no mass, inertia, bounding box or drawing).
 
+## Step 11: capsules as bodies
+
+A capsule is every point within `radius` of a segment along the body's own y axis: `Shape::capsule`,
+`Body::solid_capsule`, `Body::fixed_capsule`. It needed a mass and inertia, a bounding box, `contains`, and a
+place in `collide()`; there is no hand-written capsule collision, every pair with a capsule in it goes
+through `collide_convex` (step 10).
+
+**Inertia.** Split the mass by volume into the cylinder's share `mc` and the two end caps' `ms` (together one
+sphere). About the axis it is a cylinder plus a sphere, `mc r^2/2 + ms 2r^2/5`. Across the axis the cylinder
+gives `mc (L^2/12 + r^2/4)` and the caps, moved out to the ends by the parallel axis theorem (a hemisphere's
+centre of mass is 3r/8 from its flat face), `ms (2r^2/5 + h^2 + 3hr/4)` with `h = L/2`. Checked against a
+brute-force integral to 0.4% for three proportions, and against the two limits: no cylinder is a sphere, no
+radius is a thin rod.
+
+Measured in the world:
+- Dropped flat, it rests on two contact points and sleeps; dropped at an angle it ends lying down.
+- It rolls down a slope at `g sin(theta) / (1 + I/(m r^2))` to 2%, without slipping.
+- Hung from a hinge by its tip, it swings with the compound-pendulum period to 0.5%.
+- Three layers of logs stacked crosswise, each contact a single point between two round surfaces, stay put
+  and sleep. A pile of 30 settles in a closed room.
+- In collisions with spheres, boxes and other capsules, linear momentum is kept to a part in ten thousand
+  and energy never rises. Angular momentum drifts by up to 5%. I measured where: mostly in free flight after
+  an off-centre hit sets a long thin body tumbling at up to 19 rad/s, which is the gyroscopic step, not the
+  contact.
+
+**A bug in the sweep, older than capsules, that only capsules showed.** The rule for a body already touching
+a wall (step 7) followed the body's farthest point along the direction it entered by. Of 20000 harsh capsule
+shots, 22 went through the wall. A thin capsule that arrives end-on and turns side-on as it goes in reaches
+no deeper with its farthest point, since the end swings back as fast as the body advances, while all of it
+passes through. Watching the centre as well left one shot in 60000: its touching end was swinging away from
+the wall at 340 rad/s, so the solver saw a separating contact and did nothing, and the sweep, which held the
+pose but not the velocity, let it creep in a quarter radius per step. That is the case for the impact impulse
+I had tried and deleted twice because no box stress needed it.
+
+With the impulse in, I broke each part of the rule in turn and ran every stress I have: 200000 harsh capsule
+shots, 100000 thin boxes, the original 3000 box shots (which also demand that every shot is heading back),
+and 50000 bodies that start against a thin wall with up to 80 rad/s of spin and no speed toward it. What
+they say:
+- Watching the farthest point is not needed once the centre is watched; nothing changes without it.
+- Watching the centre is needed (3 capsules in 100000 get through without it).
+- The impulse is needed, and so is its bounce (one box shot stops dead without it).
+- Giving the impulse an arm and a torque changes nothing.
+- The cap of a quarter of the inscribed radius is needed: at a full radius, 58 of the 50000 spinners get
+  their centre into the wall.
+So the rule is now: a body already in contact may move its **centre** no more than a quarter of its
+inscribed radius further in per step, and if it is held there, the part of its velocity that was carrying
+it in is reversed as in any bounce. It is shorter than what it replaced, a ratio instead of a search, and
+the function that found a shape's farthest point is gone. After it: all four stresses clean, no shot
+through, none stuck, none gaining energy.
+
+Tests (18, 207 in total): the inertia integral and limits; mass, bounding box against the support function,
+`contains` against the distance to the axis, `collide()` against `collide_convex`; the measurements above;
+120 fast spinning capsules at a 4 cm wall with the sweep on and off; 500 harsh shots; the shots that got
+through earlier rules, kept by number; the spinners that fail with a full-radius cap; and a held body
+bouncing by the bouncier of the two materials. 21 deliberate breakages of the capsule code: 20 caught, and
+the one that was not led to everything in the paragraph above. Of the final sweep rule, 6 breakages, all
+caught after two more tests.
+
+In the demo capsules fall in scene 3 and a log rolls down the slope in scene 4 (headless renders only).
+
+Not checked: the 2D sweep. It uses a different rule for a body in contact (a cap on the overlap depth) and
+passed 300000 harsh shots, but none of those shapes was as thin for its length as these capsules.
+
 ## Planned next
 
-Capsules as bodies; then a convex hull builder (so hulls know their faces) and hulls as bodies.
+A convex hull builder, so that hulls know their faces and can rest on them; then hulls as bodies.

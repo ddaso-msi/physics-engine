@@ -1,5 +1,6 @@
 // Wireframe demo for the 3D engine (phys3d). Everything is drawn as lines through a perspective camera:
 // boxes as their 12 edges, spheres as three circles fixed in the sphere's own frame (so you can see it spin),
+// capsules as two rings, four side lines and arcs over the ends,
 // contacts as a yellow dot with a green normal, joints in orange (hinge axes in yellow). Lines further away are dimmer; nothing is hidden.
 //
 //   left-drag  orbit the camera          wheel  zoom
@@ -74,6 +75,11 @@ void add_random_bodies(World& w, Lcg& rng, int count, float height) {
             Body b = Body::solid_sphere(rng.range(0.3f, 0.55f), 1, pos);
             b.restitution = 0.3f;
             w.add(b);
+        } else if (i % 3 == 1) {
+            const Quat q = Quat::from_axis_angle({rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)}, rng.range(0, 3));
+            Body b = Body::solid_capsule(rng.range(0.25f, 0.6f), rng.range(0.2f, 0.35f), 1, pos, q);
+            b.restitution = 0.1f;
+            w.add(b);
         } else {
             const Quat q = Quat::from_axis_angle({rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)}, rng.range(0, 3));
             w.add(crate(pos, {rng.range(0.25f, 0.6f), rng.range(0.25f, 0.6f), rng.range(0.25f, 0.6f)}, q));
@@ -131,6 +137,12 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
             roller.friction = 0.9f;  // it rolls
             roller.restitution = 0;
             w.add(roller);
+            // A capsule lying across the slope rolls too, on two contact points.
+            Body log = Body::solid_capsule(0.6f, 0.35f, 1, top + n * 0.35f + Vec3{-2.5f, 0, 0} - along * 2.5f + Vec3{0, 0, 0},
+                                           tilt * Quat::from_axis_angle({1, 0, 0}, kPi / 2));
+            log.friction = 0.9f;
+            log.restitution = 0;
+            w.add(log);
             cam.target = {0, 2, 0};
             cam.distance = 17;
             cam.yaw = 0.35f;
@@ -270,6 +282,32 @@ struct Painter {
         }
     }
 
+    // A capsule: a ring at each end of its axis, four lines along it, and two half circles over each end.
+    void capsule(const Body& b, SDL_Color c) const {
+        constexpr int kSegments = 20;
+        const Real r = b.shape.radius, h = b.shape.half_length;
+        for (const Real end : {-h, h}) {
+            Vec3 prev;
+            for (int i = 0; i <= kSegments; ++i) {
+                const Real a = 2 * kPi * static_cast<Real>(i) / kSegments;
+                const Vec3 p = apply(b.transform(), {r * std::cos(a), end, r * std::sin(a)});
+                if (i > 0) line(prev, p, c);
+                prev = p;
+            }
+            for (int plane = 0; plane < 2; ++plane) {  // the cap: half circles in the xy and zy planes
+                for (int i = 0; i <= kSegments / 2; ++i) {
+                    const Real a = kPi * static_cast<Real>(i) / (kSegments / 2);
+                    const Real out = r * std::cos(a), up = (end < 0 ? -1 : 1) * r * std::sin(a);
+                    const Vec3 p = apply(b.transform(), plane == 0 ? Vec3{out, end + up, 0} : Vec3{0, end + up, out});
+                    if (i > 0) line(prev, p, c);
+                    prev = p;
+                }
+            }
+        }
+        for (const Vec3& side : {Vec3{r, 0, 0}, Vec3{-r, 0, 0}, Vec3{0, 0, r}, Vec3{0, 0, -r}})
+            line(apply(b.transform(), side + Vec3{0, -h, 0}), apply(b.transform(), side + Vec3{0, h, 0}), c);
+    }
+
     void grid() const {
         const SDL_Color c{60, 64, 78, 255};
         for (int i = -10; i <= 10; i += 2) {
@@ -297,6 +335,7 @@ void draw_world(SDL_Renderer* ren, const World& w, const Camera& cam, bool show_
                             : !b.awake                   ? SDL_Color{70, 100, 130, 255}  // asleep
                                                          : SDL_Color{120, 200, 255, 255};
         if (b.shape.type == Shape::Type::Box) paint.box(b, c);
+        else if (b.shape.type == Shape::Type::Capsule) paint.capsule(b, c);
         else paint.sphere(b, c);
     }
     // Joints: a line from each body's centre to its anchor (the two anchors coincide unless the joint has
