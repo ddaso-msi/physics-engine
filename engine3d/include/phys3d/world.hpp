@@ -1,12 +1,12 @@
 #pragma once
 // Stage 10, step 4: the 3D simulation loop.
 //
-// Contacts, sleeping and continuous collision; no joints yet.
+// Contacts, joints, sleeping and continuous collision.
 #include "broadphase.hpp"
 #include "solver.hpp"
 
 #include <cstdint>
-
+#include <unordered_set>
 #include <vector>
 
 namespace phys3d {
@@ -22,7 +22,7 @@ struct StepStats {
     std::size_t contacts = 0;            // contacts that took part in solving (dormant ones excluded)
     std::uint64_t broadphase_tests = 0;  // box comparisons / tree nodes visited
     std::size_t awake_bodies = 0;        // dynamic bodies being simulated (not asleep)
-    std::size_t islands = 0;             // groups of dynamic bodies connected by contacts
+    std::size_t islands = 0;             // groups of dynamic bodies connected by contacts or joints
     std::size_t ccd_swept = 0;           // bodies moving fast enough to be swept by the continuous pass
     std::size_t ccd_hits = 0;            // of those, how many it stopped at a static body
 };
@@ -34,8 +34,9 @@ public:
     Gyroscopic gyroscopic = Gyroscopic::Implicit;
     BroadphaseKind broadphase = BroadphaseKind::DynamicTree;
     std::vector<Body> bodies;
+    std::vector<Joint> joints;
 
-    // Sleeping, as in the 2D engine. An island (bodies linked by contacts) goes to sleep once every body in
+    // Sleeping, as in the 2D engine. An island (bodies linked by contacts and joints) goes to sleep once every body in
     // it has been slower than both thresholds for `time_to_sleep` seconds. A sleeping body is not
     // integrated or solved; anything that touches it, or sets its velocity or a force on it, wakes the
     // whole island.
@@ -55,25 +56,33 @@ public:
         bodies.push_back(body);
         return static_cast<int>(bodies.size()) - 1;
     }
-    // Wakes a body (and, on the next step, everything touching it). Call this after moving a body by hand;
+    // Joints connect bodies by index, and are solved together with the contacts every step.
+    int add_joint(const Joint& joint) {
+        joints.push_back(joint);
+        return static_cast<int>(joints.size()) - 1;
+    }
+    // Wakes a body (and, on the next step, everything touching or jointed to it). Call this after moving a body by hand;
     // changing its velocity or applying a force wakes it automatically.
     void wake(int index) { bodies[static_cast<size_t>(index)].wake(); }
 
-    // Keeps only the first `count` bodies, and forgets the contacts (their indices would be stale).
+    // Keeps only the first `count` bodies, and forgets the contacts (their indices would be stale) and the
+    // joints that referred to a removed body.
     void truncate(size_t count) {
         bodies.resize(count);
         contacts_.clear();
+        const int limit = static_cast<int>(count);
+        std::erase_if(joints, [&](const Joint& j) { return j.a >= limit || j.b >= limit; });
     }
 
     // One step:
-    //   0. wake sleepers that were disturbed (a force, a velocity)
+    //   0. wake sleepers that were disturbed (a force, a velocity, a motor told to turn)
     //   1. broad phase: AABB overlaps give candidate pairs
-    //   2. narrow phase on the candidates (skipping pairs where both bodies sleep), then match each contact
+    //   2. narrow phase on the candidates (skipping jointed pairs and pairs where both bodies sleep), then match each contact
     //      point to last step's by id so it can inherit that step's impulse
-    //   3. build islands from contacts; an awake body touching a sleeping island wakes it
+    //   3. build islands from contacts and joints; an awake body touching a sleeping island wakes it
     //   4. apply gravity and forces to velocities
-    //   5. solve the contacts
-    //   6. move the bodies
+    //   5. solve the joints and contacts
+    //   6. move the bodies, then correct joint position error
     //   7. continuous collision: stop fast bodies that went into or through a static body
     //   8. put islands that have been still long enough to sleep
     void step(Real dt);
@@ -95,6 +104,7 @@ private:
     TreeBroadphase tree_;
     std::vector<AABB> boxes_;  // scratch, reused every step
     std::vector<std::uint8_t> immovable_;
+    std::unordered_set<std::uint64_t> no_collide_;  // body pairs joined by a joint that forbids their collision
 };
 
 }  // namespace phys3d

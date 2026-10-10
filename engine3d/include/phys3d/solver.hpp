@@ -12,14 +12,11 @@
 //         1/m_eff = 1/mA + 1/mB + dir . ((IA^-1 (ra x dir)) x ra) + dir . ((IB^-1 (rb x dir)) x rb).
 #include "body.hpp"
 #include "collision.hpp"
-
-#include <phys/solver_settings.hpp>
+#include "joints.hpp"
 
 #include <vector>
 
 namespace phys3d {
-
-using phys::SolverSettings;
 
 // One colliding pair found by the narrow phase: indices into the world's body array.
 struct ContactPair {
@@ -30,9 +27,17 @@ struct ContactPair {
     bool dormant = false;
 };
 
-// Changes the bodies' velocities so no contact is closing, with bounce and friction from their materials.
-// Reads each point's stored impulses (when warm starting) and writes the final ones back.
-void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt, const SolverSettings& settings);
+// Changes the bodies' velocities so every joint's constraint holds and no contact is closing, with bounce
+// and friction from the materials. Joints and contacts take part in the same sweeps, joints first in each
+// (holding a hinge together outranks a touch). Reads each contact point's and joint row's stored impulses
+// (when warm starting) and writes the final ones back.
+void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, std::vector<Joint>& joints, Real dt,
+                       const SolverSettings& settings);
+// Contacts only.
+inline void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt, const SolverSettings& settings) {
+    std::vector<Joint> none;
+    solve_constraints(bodies, contacts, none, dt, settings);
+}
 
 // Copies impulses from last step's contacts to this step's: a point inherits those of the previous point
 // with the same body pair and the same feature id. Unmatched points start from zero.

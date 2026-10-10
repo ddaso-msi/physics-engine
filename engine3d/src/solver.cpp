@@ -80,7 +80,13 @@ Real effective_inverse_mass(const ContactConstraint& c, const PointConstraint& p
 
 }  // namespace
 
-void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt, const SolverSettings& settings) {
+void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, std::vector<Joint>& joints, Real dt,
+                       const SolverSettings& settings) {
+    // Joint rows are prepared first but change no velocities, so the contacts below still measure their
+    // arrival speeds from the unmodified velocities.
+    JointSolver joint_solver;
+    joint_solver.prepare(bodies, joints, dt, settings);
+
     std::vector<ContactConstraint> constraints;
     constraints.reserve(contacts.size());
 
@@ -128,6 +134,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
 
     // Warm start, as a separate pass after every constraint has measured its arrival speed.
     if (settings.warm_starting) {
+        joint_solver.warm_start();
         for (ContactConstraint& c : constraints)
             for (int k = 0; k < c.count; ++k) {
                 const PointConstraint& p = c.points[k];
@@ -136,6 +143,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
     }
 
     for (int sweep = 0; sweep < settings.iterations; ++sweep) {
+        joint_solver.solve_velocity();
         for (ContactConstraint& c : constraints) {
             // Friction first; the normal constraint gets the last word in each sweep.
             for (int k = 0; k < c.count; ++k) {
@@ -168,6 +176,7 @@ void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contact
         }
     }
 
+    joint_solver.store();
     for (size_t i = 0; i < constraints.size(); ++i)
         for (int k = 0; k < constraints[i].count; ++k) {
             ContactPoint& cp = contacts[constraints[i].source].manifold.points[k];

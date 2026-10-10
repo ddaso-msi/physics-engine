@@ -33,6 +33,11 @@ struct UnionFind {
 // turned (taking "the short way round" instead would be wrong for a turn of more than half a revolution).
 // A normalised blend is not perfectly even in angle, which does not matter: it only has to pass through
 // every pose in between.
+std::uint64_t pair_key(int a, int b) {
+    if (a > b) std::swap(a, b);
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(a)) << 32) | static_cast<std::uint32_t>(b);
+}
+
 Quat blend(const Quat& q0, const Quat& q1, Real t) { return (q0 * (1 - t) + q1 * t).normalized(); }
 
 // The point of the body's shape farthest along unit direction d, if the body were at (pos, q).
@@ -56,6 +61,14 @@ void World::step(Real dt) {
         if (!allow_sleep || b.force.length_sq() != 0 || b.torque.length_sq() != 0 || b.vel.length_sq() != 0 || b.w.length_sq() != 0)
             b.wake();
     }
+    // A motor told to turn, with torque to do it, must be able to start a sleeping mechanism: commanding
+    // it touches no velocity and no force.
+    for (const Joint& j : joints) {
+        if (j.type == JointType::Hinge && j.enable_motor && j.max_motor > 0 && j.motor_speed != 0) {
+            if (j.a >= 0) bodies[static_cast<size_t>(j.a)].wake();
+            if (j.b >= 0) bodies[static_cast<size_t>(j.b)].wake();
+        }
+    }
 
     std::vector<ContactPair> previous = std::move(contacts_);
     contacts_.clear();
@@ -76,11 +89,17 @@ void World::step(Real dt) {
     }
     stats_.candidate_pairs = candidates.size();
 
+    // Bodies held together by a joint do not collide with each other (unless the joint says they may).
+    no_collide_.clear();
+    for (const Joint& j : joints)
+        if (!j.collide_connected && j.a >= 0 && j.b >= 0) no_collide_.insert(pair_key(j.a, j.b));
+
     // 2. Narrow phase. A pair where neither body is being simulated cannot change, so it is not recomputed...
     for (const IndexPair& pair : candidates) {
         const Body& a = bodies[static_cast<size_t>(pair.a)];
         const Body& b = bodies[static_cast<size_t>(pair.b)];
         if (!a.is_active() && !b.is_active()) continue;
+        if (!no_collide_.empty() && no_collide_.count(pair_key(pair.a, pair.b))) continue;
         ContactPair contact;
         if (collide(a, b, contact.manifold)) {
             contact.a = pair.a;
@@ -99,12 +118,14 @@ void World::step(Real dt) {
     }
     transfer_impulses(previous, contacts_);
 
-    // 3. Islands. A contact between two dynamic bodies links them; static bodies link nothing (a floor of
+    // 3. Islands. A contact or a joint between two dynamic bodies links them; static bodies link nothing (a floor of
     //    separate piles is not one island).
     UnionFind islands(n);
     auto dynamic = [&](int i) { return bodies[static_cast<size_t>(i)].type == BodyType::Dynamic; };
     for (const ContactPair& c : contacts_)
         if (c.manifold.count > 0 && dynamic(c.a) && dynamic(c.b)) islands.unite(c.a, c.b);
+    for (const Joint& j : joints)
+        if (j.a >= 0 && j.b >= 0 && dynamic(j.a) && dynamic(j.b)) islands.unite(j.a, j.b);
 
     island_awake_.assign(n, 0);
     stats_.islands = 0;
@@ -123,10 +144,10 @@ void World::step(Real dt) {
             c.dormant = false;
     stats_.contacts = static_cast<size_t>(std::count_if(contacts_.begin(), contacts_.end(), [](const ContactPair& c) { return !c.dormant; }));
 
-    // 4-6. Forces, contacts, movement.
+    // 4-6. Forces, constraints, movement.
     for (Body& b : bodies)
         if (b.awake) b.integrate_velocity(dt, gravity, gyroscopic);
-    solve_contacts(bodies, contacts_, dt, solver);
+    solve_constraints(bodies, contacts_, joints, dt, solver);
     prev_pos_.resize(n);
     prev_q_.resize(n);
     for (size_t i = 0; i < n; ++i) {
@@ -135,6 +156,7 @@ void World::step(Real dt) {
     }
     for (Body& b : bodies)
         if (b.awake) b.integrate_position(dt);
+    solve_joint_positions(bodies, joints, solver);
 
     // 7. Continuous collision.
     stats_.ccd_swept = 0;

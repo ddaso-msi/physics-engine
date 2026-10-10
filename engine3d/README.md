@@ -268,7 +268,70 @@ revolution.
 In the demo `S` toggles sleeping (sleepers are drawn dim), `K` toggles the sweep, and the readout shows awake
 bodies, islands, and how many bodies were swept and stopped.
 
+## Step 8: joints (`joints.hpp`, `src/joints.cpp`)
+
+Three joints, on the 2D engine's method: each is a few scalar velocity rows `J v = lin_a.v_a + ang_a.w_a +
+lin_b.v_b + ang_b.w_b`, solved by impulses in the same sweeps as the contacts (joints first), with the
+accumulated impulse clamped and kept to warm start the next step, and position error removed by a separate
+pass that moves poses, never velocities.
+
+- **Distance**: one row along the line between two anchors. A rod, or with `frequency_hz > 0` a spring-damper.
+- **Ball and socket**: the two anchors coincide. A point has three coordinates, so three rows, one per world
+  axis; all three rotations stay free.
+- **Hinge**: the ball's three rows, plus two that stop relative turning about the two directions
+  perpendicular to the axis. Each body carries its own copy of the axis (`a1`, `b1`); for a small
+  misalignment `a1 x b1` is the rotation that has pulled them apart, which gives both rows their error. The
+  angle about the axis is measured between a reference direction carried by each body, with `atan2`, so it
+  lies in (-pi, pi]. On it sit an optional motor (target speed, torque limit) and optional limits (one-sided
+  rows).
+
+What changes from 2D: the angular part of a row is a vector, and the effective mass goes through the inertia
+tensor, `J M^-1 J^T = |lin_a|^2/m_a + ang_a.(I_a^-1 ang_a) + ...`. Each row stores `I^-1 ang` for both bodies
+once, which is also exactly the spin a unit impulse gives them.
+
+In the world: jointed bodies do not collide unless the joint says so; a joint links its bodies into one island,
+so they sleep and wake together; a motor told to turn wakes its mechanism; `truncate` drops joints whose
+bodies went.
+
+**A bug found here, which the 2D engine had too.** The position pass corrected joints one at a time but all
+the rows of a joint from one measurement. For a hinge at its limit that fails: closing the pin turns the arm
+off the limit, turning it back opens the pin, and the two overshoot against each other. An arm dropped onto
+its lower stop hung 0.08 rad above it with the pin 8 cm apart, and its speed built up unchecked because it was
+never "at" the limit. My first reading of the trace blamed the limit row; printing the errors pass by pass
+showed them alternating. The pass now measures again after every row. The same sweep in 2D (108 arms) failed
+56 times before and none after; that fix is on `main`.
+
+Things measured, not assumed:
+- A sphere on a ball joint swings with the compound-pendulum period `2 pi sqrt((I + m L^2)/(m g L))` to 0.5%.
+- Swung in a circle it keeps its angular momentum about the vertical to 1% (at 960 Hz).
+- Spin about an **off-centre** pin is slowly lost: 6% of the speed in 5 s at 240 Hz, a quarter of that at
+  960 Hz, and the 2D engine loses the same. Each step moves the body along the tangent, the position pass
+  pulls it back to the circle, and projecting the velocity onto the new tangent costs about `(w dt)^2` of the
+  energy. Spin about a pin through the centre of mass loses nothing. My first tests demanded exact
+  conservation and were wrong to.
+- A hinged arm follows the 2D engine's revolute joint to 2 mm over 3 s.
+- A torque-limited motor spins a wheel up at `torque / I`; it lifts an arm at 1.1 times the torque the weight
+  needs and not at 0.9.
+- An 8-link chain carrying a ball 26 times a link's mass, dropped from horizontal: worst pin gap 13.5 mm
+  (10 sweeps), and its energy never rises. Heavier is worse (128x: 24 mm; 511x: 12 cm); more sweeps help.
+- The undamped spring is not lossless: implicit Euler leaves about half the speed after 2 s at 240 Hz. Its
+  period is right to 2%, and with damping ratio 0.2 successive peaks shrink by the textbook factor 0.277.
+
+Tests (28, 144 in total): every row against a finite difference of the error it claims to be the rate of; the
+measurements above; momentum of two free jointed bodies; the stored impulse of a resting pendulum equal to
+`m g dt`; a pulled-apart, twisted hinge closed by the position pass with exactly zero velocity created;
+limits, including the arm resting on its stop; islands, sleeping, waking by motor; a jointed arm lying on the
+floor. Of 34 deliberate breakages 31 were caught at first. Two showed gaps (doubling the damping; dropping
+the 8 degree cap on one correction) and now have tests; the third flips the sign of one hinge direction,
+which changes nothing.
+
+In the demo, scene `6` is a swinging chain, a plank bridge and a spring; scene `7` is a door with limits, a
+two-part flail on crossed hinges, and a motor driving a paddle through crates. Joints are drawn in orange,
+hinge axes in yellow. Checked by headless renders only.
+
+Not done: a slider (prismatic) joint, a fixed (weld) joint, cone and twist limits for the ball joint, a mouse
+joint. Hinge limits must lie inside (-pi, pi).
+
 ## Planned next
 
-Joints in 3D (ball-and-socket, hinge, distance, with the 2D position-correction pass), then GJK/EPA for
-general convex shapes.
+GJK/EPA for general convex shapes.

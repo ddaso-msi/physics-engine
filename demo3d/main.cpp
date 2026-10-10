@@ -1,9 +1,10 @@
 // Wireframe demo for the 3D engine (phys3d). Everything is drawn as lines through a perspective camera:
 // boxes as their 12 edges, spheres as three circles fixed in the sphere's own frame (so you can see it spin),
-// contacts as a yellow dot with a green normal. Lines further away are dimmer; nothing is hidden.
+// contacts as a yellow dot with a green normal, joints in orange (hinge axes in yellow). Lines further away are dimmer; nothing is hidden.
 //
 //   left-drag  orbit the camera          wheel  zoom
 //   1 tower   2 pyramid   3 mixed rain   4 slope (friction and rolling)   5 tumble (zero gravity)
+//   6 chains, a bridge and a spring (ball and distance joints)   7 hinges: a door, a flail, a motor
 //   Space  shoot a ball from the camera   F  drop 10 more random bodies
 //   W  warm starting on/off   - / =  fewer / more solver sweeps   G  gyroscopic term: implicit / explicit / off
 //   B  broad phase: tree / brute force   S  sleeping on/off (sleepers are drawn dim)   K  continuous collision on/off
@@ -33,13 +34,16 @@ constexpr int kWidth = 960, kHeight = 640;
 constexpr size_t kMaxBodies = 1200;  // a debug build gets slow well before this
 constexpr Real kDt = 1.0f / 120.0f;
 
-enum class Scene { Tower = 1, Pyramid, Rain, Slope, Tumble };
+enum class Scene { Tower = 1, Pyramid, Rain, Slope, Tumble, Chains, Machines };
+constexpr int kSceneCount = 7;
 const char* scene_name(Scene s) {
     switch (s) {
         case Scene::Tower: return "tower";
         case Scene::Pyramid: return "pyramid";
         case Scene::Rain: return "mixed rain";
         case Scene::Slope: return "slope";
+        case Scene::Chains: return "chains and a bridge (ball joints, a spring)";
+        case Scene::Machines: return "hinges: door, flail, motor";
         default: return "tumble (zero gravity)";
     }
 }
@@ -147,6 +151,79 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
             cam.pitch = 0.2f;
             break;
         }
+        case Scene::Chains: {
+            // A chain hung by one end with a heavy ball on the other, started out sideways so it swings.
+            int previous = -1;
+            const Vec3 top{-5, 7, 0};
+            for (int i = 0; i < 8; ++i) {
+                const int link = w.add(crate(top + Vec3{0.3f + 0.6f * static_cast<float>(i), 0, 0}, {0.3f, 0.06f, 0.06f}));
+                w.add_joint(Joint::ball(w.bodies, previous, link, top + Vec3{0.6f * static_cast<float>(i), 0, 0}));
+                previous = link;
+            }
+            const int weight = w.add(Body::solid_sphere(0.45f, 1, top + Vec3{4.8f + 0.45f, 0, 0}));
+            w.add_joint(Joint::ball(w.bodies, previous, weight, top + Vec3{4.8f, 0, 0}));
+
+            // A plank bridge pinned to the world at both ends, with a load dropped on it.
+            previous = -1;
+            const Vec3 left{-3.5f, 2.5f, 3};
+            for (int i = 0; i < 7; ++i) {
+                const int plank = w.add(crate(left + Vec3{0.5f + static_cast<float>(i), 0, 0}, {0.5f, 0.06f, 0.6f}));
+                for (float side : {-0.5f, 0.5f})  // two pins per joint, so the planks cannot twist freely
+                    w.add_joint(Joint::ball(w.bodies, previous, plank, left + Vec3{static_cast<float>(i), 0, side}));
+                previous = plank;
+            }
+            for (float side : {-0.5f, 0.5f}) w.add_joint(Joint::ball(w.bodies, previous, -1, left + Vec3{7, 0, side}));
+            w.add(crate(left + Vec3{3.5f, 1.5f, 0}, {0.4f, 0.4f, 0.4f}));
+
+            // A ball on a spring.
+            const int bob = w.add(Body::solid_sphere(0.4f, 1, {4, 4.5f, -2}));
+            Joint spring = Joint::distance(w.bodies, -1, bob, {4, 7, -2}, {4, 4.5f, -2});
+            spring.frequency_hz = 1;
+            spring.damping_ratio = 0.05f;
+            w.add_joint(spring);
+            w.bodies[static_cast<size_t>(bob)].vel = {1.5f, 0, 0};
+
+            cam.target = {0, 3.5f, 0};
+            cam.distance = 19;
+            cam.yaw = 0.3f;
+            break;
+        }
+        case Scene::Machines: {
+            // A door on a vertical hinge that opens 100 degrees either way, pushed by a ball.
+            w.add(Body::fixed_box({0.1f, 1.5f, 0.1f}, {-5, 1.5f, 0}));
+            const int door = w.add(crate({-3.9f, 1.5f, 0}, {1.0f, 1.3f, 0.06f}));
+            Joint hinge = Joint::hinge(w.bodies, -1, door, {-4.9f, 1.5f, 0}, {0, 1, 0});
+            hinge.enable_limit = true;
+            hinge.lower = -1.75f;
+            hinge.upper = 1.75f;
+            w.add_joint(hinge);
+            Body push = Body::solid_sphere(0.4f, 1, {-3.4f, 1.6f, 4});
+            push.vel = {0, 1, -9};
+            w.add(push);
+
+            // A two-part flail: an arm on a horizontal hinge, a second arm hinged to it at right angles.
+            const Vec3 pivot{0, 6, 0};
+            const int upper = w.add(crate(pivot + Vec3{1, 0, 0}, {1.0f, 0.1f, 0.1f}));
+            w.add_joint(Joint::hinge(w.bodies, -1, upper, pivot, {0, 0, 1}));
+            const int lower = w.add(crate(pivot + Vec3{2, 0, 1}, {0.1f, 0.1f, 1.0f}));
+            w.add_joint(Joint::hinge(w.bodies, upper, lower, pivot + Vec3{2, 0, 0}, {1, 0, 0}));
+
+            // A motor turning a paddle through a pile of crates.
+            w.add(Body::fixed_box({0.15f, 0.6f, 0.15f}, {5, 0.6f, 0}));
+            const int paddle = w.add(crate({5, 1.4f, 0}, {2.0f, 0.15f, 0.15f}));
+            Joint motor = Joint::hinge(w.bodies, -1, paddle, {5, 1.4f, 0}, {0, 1, 0});
+            motor.enable_motor = true;
+            motor.motor_speed = 1.5f;
+            motor.max_motor = 60;
+            w.add_joint(motor);
+            for (int i = 0; i < 4; ++i) w.add(crate({5 + 1.4f * (i % 2 ? 1.0f : -1.0f), 0.7f, 1.2f * (i < 2 ? 1.0f : -1.0f)}, {0.3f, 0.7f, 0.3f}));
+
+            cam.target = {0, 2.5f, 0};
+            cam.distance = 19;
+            cam.yaw = 0.5f;
+            cam.pitch = 0.45f;
+            break;
+        }
     }
 }
 
@@ -221,6 +298,23 @@ void draw_world(SDL_Renderer* ren, const World& w, const Camera& cam, bool show_
         if (b.shape.type == Shape::Type::Box) paint.box(b, c);
         else paint.sphere(b, c);
     }
+    // Joints: a line from each body's centre to its anchor (the two anchors coincide unless the joint has
+    // come apart, or is a rod or spring), and a short line along a hinge's axis.
+    for (const Joint& j : w.joints) {
+        const SDL_Color c{255, 140, 90, 255};
+        const Vec3 pa = j.world_anchor_a(w.bodies), pb = j.world_anchor_b(w.bodies);
+        if (j.type == JointType::Distance) {
+            paint.line(pa, pb, c);
+        } else {
+            if (j.a >= 0) paint.line(w.bodies[static_cast<size_t>(j.a)].pos, pa, c);
+            if (j.b >= 0) paint.line(w.bodies[static_cast<size_t>(j.b)].pos, pb, c);
+        }
+        if (j.type == JointType::Hinge) {
+            const Vec3 axis = j.world_axis(w.bodies);
+            paint.line(pa - axis * 0.4f, pa + axis * 0.4f, {255, 220, 120, 255});
+        }
+        paint.dot(pa, c);
+    }
     if (show_contacts)
         for (const ContactPair& c : w.contacts())
             for (int k = 0; k < c.manifold.count; ++k) {
@@ -257,7 +351,7 @@ int main(int argc, char** argv) {
     World world;
     Camera cam;
     Lcg rng;
-    Scene scene = static_cast<Scene>(std::clamp(arg_scene, 1, 5));
+    Scene scene = static_cast<Scene>(std::clamp(arg_scene, 1, kSceneCount));
     load_scene(scene, world, cam, rng);
     for (int i = 0; i < arg_steps; ++i) world.step(kDt);
 
@@ -273,7 +367,7 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_KEY_DOWN) {
                 switch (e.key.key) {
                     case SDLK_ESCAPE: running = false; break;
-                    case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
+                    case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6: case SDLK_7:
                         scene = static_cast<Scene>(static_cast<int>(e.key.key - SDLK_1) + 1);
                         load_scene(scene, world, cam, rng);
                         break;
@@ -326,7 +420,7 @@ int main(int argc, char** argv) {
         draw_world(renderer, world, cam, show_contacts);
         if (show_text) {
             SDL_SetRenderDrawColor(renderer, 150, 154, 170, 255);
-            SDL_RenderDebugText(renderer, 16, 12, "drag orbit | wheel zoom | 1-5 scene | Space shoot | F drop 10 | R reload | Tab pause | H hide text");
+            SDL_RenderDebugText(renderer, 16, 12, "drag orbit | wheel zoom | 1-7 scene | Space shoot | F drop 10 | R reload | Tab pause | H hide text");
             SDL_RenderDebugTextFormat(renderer, 16, 28, "scene: %s | bodies %d | contact pairs %d | step %.2f ms%s", scene_name(scene),
                                       static_cast<int>(world.bodies.size()) - 1, static_cast<int>(world.contacts().size()), step_ms,
                                       paused ? " | PAUSED" : "");
