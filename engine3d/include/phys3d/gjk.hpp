@@ -29,6 +29,7 @@
 // shapes' distance is just the cores' distance minus the two radii, exact and with no EPA, even when the
 // rounded shapes overlap. EPA runs only when the cores themselves overlap.
 #include "body.hpp"
+#include "hull.hpp"
 
 namespace phys3d {
 
@@ -47,12 +48,17 @@ struct Convex {
     Vec3 half;
     const Vec3* points = nullptr;  // Core::Points: not owned; must outlive the Convex
     int count = 0;
+    // Core::Points, optional: the same points as a built hull, which knows its faces. GJK and EPA do not
+    // need it; contact patches do (a shape can only rest on a face it knows it has). Not owned either.
+    const Hull* faces = nullptr;
     Real radius = 0;  // every point within this distance of the core belongs to the shape
 
     static Convex sphere(Real radius, Vec3 pos);
     static Convex capsule(Real half_length, Real radius, Vec3 pos, Quat q = {});
     static Convex box(Vec3 half, Vec3 pos, Quat q = {});
     static Convex hull(const Vec3* points, int count, Vec3 pos, Quat q = {}, Real radius = 0);
+    // A built hull placed in the world: its corners for GJK and EPA, its faces for contact patches.
+    static Convex hull(const Hull& built, Vec3 pos, Quat q = {}, Real radius = 0);
     static Convex of(const Body& body);
 
     // The core's point farthest along world direction d (any length, not zero).

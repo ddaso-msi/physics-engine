@@ -595,6 +595,53 @@ flat clouds and the 12 dented ones; clouds with no volume. Cost: 14 microseconds
 Not done: nothing uses the faces yet. Hulls still collide through their point cloud and get a one-point
 contact.
 
+## Step 13: face contacts for hulls
+
+A `Convex` can now carry a built hull (`Convex::hull(built, pos, q)`), and `collide_convex` uses it: the
+feature a hull presents along the contact normal is the face that faces that way most squarely, a convex
+polygon of up to 16 corners. The clipping of step 10 was written for a box's rectangle; it now takes any
+convex polygon as the reference (one clipping plane through each side, facing outward) and any polygon,
+segment or point as the thing clipped. Boxes go through the same code.
+
+- A tetrahedron rests on three points. A hexagonal prism on its end gets four of its six corners, spread
+  round it; lying on a side, that rectangle's four.
+- A cube overhanging a slanted side of a hexagon is cut along that side, and the patch is the same whichever
+  of the two is asked first.
+- A capsule lying on a hull's face gets a point under each end; a ball, one; a rounded hull is its radius
+  taller.
+- A cloud of points that was never built into a hull still works, with one point.
+
+Checked against boxes, which are the shape with a known answer: a hull built from a box's eight corners
+gives the box's normal, depth and patch on 4000 shallow contacts, alone and against a real box. And the box
+code and the convex path still agree on 20000 random box pairs: 10087 of the 10088 contacts with the same
+normal have the same points. An audit of 6000 shallow contacts over ten hulls (prisms, a tetrahedron, random
+hulls) against hulls, boxes, capsules and balls, half of them pressed face to face, holds every manifold to:
+depth equal to the overlap along its normal, every point no deeper than that, ids distinct, and moving out
+by the depth separates the pair. A stress of 200000 such contacts over 30 hulls is clean.
+
+Three things that changed outside the new code, each because a hull showed it up:
+- **The clip margin overshoots at sharp corners.** The 2 mm margin (step 3) lets a corner lying exactly on a
+  side stay a corner. On a rectangle a point can end up 2.8 mm outside the face. On a thin triangular face
+  of a random hull the two margins meet 14 cm beyond the tip. Points the margin let through are now brought
+  back to the nearest point of the face's outline. The box code got the same correction, so that the two
+  paths stay identical; its contact points near a face's edge moved by up to 2 mm.
+- **Which four points are kept was decided by rounding.** A hexagon resting flat has six equally deep
+  corners. An exact "pick the deepest, then the farthest..." chose a different four after a nudge of a
+  millimetre, and the solver would have lost its stored impulses every time. A later candidate now wins only
+  if it is clearly better (0.1 mm of depth, a thousandth in distance or area). The choice is greedy, not a
+  search: on stretched and lopsided faces it spans at least 65% of the best area any four corners could.
+- **"A contact point is inside both shapes" is only true of boxes.** A point halfway through the overlap,
+  under a corner of a face whose neighbouring sides slope inward (a tetrahedron's, most hulls'), lies just
+  outside that sloping side, by less than the overlap. The hull audit allows exactly that much.
+
+Tests (9, 228 in total): the above. Of 24 deliberate breakages 20 were caught at first. Two showed gaps, now
+tested (the spread of the four points; stability under a tilt too slight to see). Two changed nothing and
+their code is gone: a term in the contact id for which shape is the reference, and a redundant check.
+
+Not done: hulls are not bodies, so no simulation uses any of this yet. A hull face with more than 16
+corners falls back to a one-point contact.
+
 ## Planned next
 
-Face contacts for hulls in `collide_convex`, then hulls as bodies (mass and inertia of a polyhedron).
+Hulls as bodies: the mass, centre of mass and inertia of a polyhedron, a bounding box, drawing; then piles
+of them.

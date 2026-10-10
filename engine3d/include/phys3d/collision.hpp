@@ -42,7 +42,8 @@ bool collide(const Body& a, const Body& b, Manifold& out);
 
 // The same contract, for any two convex shapes, built on GJK and EPA (gjk.hpp) instead of on knowledge of
 // the particular shapes. GJK/EPA give the normal, the depth and ONE point; this adds the rest of the contact
-// patch when a box face is involved (up to four points) or two capsules lie side by side (two).
+// patch when a face of a box or of a built hull is involved (up to four points) or two capsules lie side by
+// side (two).
 bool collide_convex(const Convex& a, const Convex& b, Manifold& out);
 
 // Is `world_point` inside the body's shape? (For picking, and for testing the narrow phase.)

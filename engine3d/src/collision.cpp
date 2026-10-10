@@ -140,7 +140,7 @@ int clip_polygon(ClipVertex* out, const ClipVertex* in, int count, Vec3 n, Real 
 int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
     if (count <= Manifold::kMaxPoints) return count;
     auto flat = [&](int i) { return phys::Vec2{dot(pts[i].point, u), dot(pts[i].point, v)}; };
-    bool used[16] = {};
+    bool used[64] = {};  // (count is at most 32: see face_patch)
     int chosen[4];
     // Every "pick the best" loop below compares with >, which is false for NaN. If a body's position has
     // gone NaN (a blown-up simulation) no candidate would win, so fall back to any point not yet taken
@@ -151,9 +151,15 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
         return 0;
     };
 
+    // Each "pick the best" below lets a later candidate win only if it is CLEARLY better (by a tenth of a
+    // millimetre of depth, or a thousandth in distance or area). A shape resting flat has several corners
+    // equally deep and equally far apart, and an exact comparison would let rounding pick a different four
+    // every frame: the solver would lose the impulses it had stored for the corners dropped.
+    auto clearly = [](Real x, Real than) { return x > than * static_cast<Real>(1.001) + static_cast<Real>(1e-9); };
+
     chosen[0] = 0;
     for (int i = 1; i < count; ++i)
-        if (pts[i].depth > pts[chosen[0]].depth) chosen[0] = i;
+        if (pts[i].depth > pts[chosen[0]].depth + static_cast<Real>(1e-4)) chosen[0] = i;
     used[chosen[0]] = true;
 
     chosen[1] = -1;
@@ -161,7 +167,7 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
     for (int i = 0; i < count; ++i) {
         if (used[i]) continue;
         const Real d = (flat(i) - flat(chosen[0])).length_sq();
-        if (d > best) {
+        if (clearly(d, best)) {
             best = d;
             chosen[1] = i;
         }
@@ -175,7 +181,7 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
     best = -1;
     for (int i = 0; i < count; ++i) {
         if (used[i]) continue;
-        if (std::fabs(side(i)) > best) {
+        if (clearly(std::fabs(side(i)), best)) {
             best = std::fabs(side(i));
             chosen[2] = i;
         }
@@ -189,7 +195,7 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
     for (int i = 0; i < count; ++i) {  // farthest on the opposite side of the first edge
         if (used[i]) continue;
         const Real opposite = third_side >= 0 ? -side(i) : side(i);
-        if (opposite > best) {
+        if (clearly(opposite, best)) {
             best = opposite;
             chosen[3] = i;
         }
@@ -200,7 +206,7 @@ int reduce_to_four(ContactPoint* pts, int count, Vec3 u, Vec3 v) {
             if (used[i]) continue;
             Real nearest = kRealMax;
             for (int k = 0; k < 3; ++k) nearest = std::min(nearest, (flat(i) - flat(chosen[k])).length_sq());
-            if (nearest > best) {
+            if (clearly(nearest, best)) {
                 best = nearest;
                 chosen[3] = i;
             }
@@ -261,9 +267,13 @@ void face_manifold(const WorldBox& ref, const WorldBox& inc, int ref_axis, Vec3 
     int found = 0;
     for (int i = 0; i < count; ++i) {
         const Real dist = dot(n, src[i].p - ref_center);  // <= 0 means behind the reference face
-        if (dist <= 0)
-            candidates[found++] = {src[i].p - n * (dist * static_cast<Real>(0.5)), -dist,
-                                   pair_code | (src[i].tag & 0x1FFFFFu)};
+        if (dist > 0) continue;
+        // The clipping planes sat a margin outside the face (see kClipMargin). Bring a point that the margin
+        // let through back onto the face proper: for a rectangle, one side at a time.
+        Vec3 on_face = src[i].p;
+        for (int k = 0; k < 4; ++k)
+            on_face -= side_normal[k] * std::max(dot(side_normal[k], on_face - ref_center) - side_half[k], Real(0));
+        candidates[found++] = {on_face - n * (dist * static_cast<Real>(0.5)), -dist, pair_code | (src[i].tag & 0x1FFFFFu)};
     }
     if (found == 0) {
         // SAT proved an overlap, but the incident face's patch over the reference face is empty (the boxes
@@ -391,17 +401,23 @@ bool collide_boxes(const Body& body_a, const Body& body_b, Manifold& out) {
 // any two convex shapes, by GJK and EPA
 // ---------------------------------------------------------------------------------------------
 
-// The flat piece of a shape's core that faces a given direction: a point (a sphere's centre, a hull's
-// farthest vertex), a segment (a capsule's axis) or a rectangle (the face of a box that faces that way most
-// squarely).
+// The flat piece of a shape's core that faces a given direction: a point (a sphere's centre, the farthest
+// vertex of a hull that does not know its faces), a segment (a capsule's axis), or a convex polygon (the
+// face of a box or of a built hull that faces that way most squarely).
 struct Feature {
-    Vec3 p[4];
-    int count = 0;  // 1, 2 or 4 (corners in order round the face)
+    static constexpr int kMaxCorners = 16;
+
+    Vec3 p[kMaxCorners];  // the point, the segment's ends, or the face's corners in order round it
+    int count = 0;
     // For a face:
-    Vec3 center, normal, u, v;  // normal is outward; u and v lie in the face
-    Real hu = 0, hv = 0;        // half the face's size along u and v
-    Real alignment = 0;         // how squarely it faces the direction asked for: 1 is exactly
-    std::uint32_t code = 7;     // which face of the box (axis and side), for contact ids; 7 = not a face
+    bool face = false;
+    Vec3 normal;                    // outward
+    Vec3 origin;                    // some point of it (heights above the face are measured from here)
+    Vec3 u, v;                      // two perpendicular directions in its plane
+    Vec3 side[kMaxCorners];         // one plane through each side, facing outward and perpendicular to
+    Real side_offset[kMaxCorners];  // the face: a point q is within that side if dot(side, q) <= side_offset
+    Real alignment = 0;             // how squarely it faces the direction asked for: 1 is exactly
+    std::uint32_t code = ~0u;       // which face of the shape, for contact ids
 };
 
 Feature facing_feature(const Convex& c, Vec3 d) {
@@ -422,19 +438,54 @@ Feature facing_feature(const Convex& c, Vec3 d) {
         f.alignment = std::fabs(dot(axis[k], d));
         f.u = axis[(k + 1) % 3];
         f.v = axis[(k + 2) % 3];
-        f.hu = c.half[(k + 1) % 3];
-        f.hv = c.half[(k + 2) % 3];
-        f.center = c.pos + f.normal * c.half[k];
-        const Vec3 eu = f.u * f.hu, ev = f.v * f.hv;
-        f.p[0] = f.center + eu + ev;
-        f.p[1] = f.center - eu + ev;
-        f.p[2] = f.center - eu - ev;
-        f.p[3] = f.center + eu - ev;
+        const Real hu = c.half[(k + 1) % 3], hv = c.half[(k + 2) % 3];
+        const Vec3 center = c.pos + f.normal * c.half[k], eu = f.u * hu, ev = f.v * hv;
+        f.origin = center;
+        f.p[0] = center + eu + ev;
+        f.p[1] = center - eu + ev;
+        f.p[2] = center - eu - ev;
+        f.p[3] = center + eu - ev;
+        // The four sides, in the order the box code clips against them (so the two give the same points).
+        const Vec3 out[4] = {f.u, -f.u, f.v, -f.v};
+        const Real half[4] = {hu, hu, hv, hv};
+        for (int i = 0; i < 4; ++i) {
+            f.side[i] = out[i];
+            f.side_offset[i] = dot(out[i], center) + half[i];
+        }
         f.count = 4;
+        f.face = true;
         f.code = static_cast<std::uint32_t>(k) * 2 + (negative ? 1u : 0u);
+    } else if (c.core == Convex::Core::Points && c.faces) {
+        // A built hull: the face whose normal lies closest to the direction asked for.
+        const Vec3 local = inv_rotate(c.q, d);
+        const Hull& h = *c.faces;
+        size_t best = 0;
+        for (size_t i = 1; i < h.faces.size(); ++i)
+            if (dot(h.faces[i].normal, local) > dot(h.faces[best].normal, local)) best = i;
+        const Hull::Face& face = h.faces[best];
+        if (face.count <= Feature::kMaxCorners) {
+            for (int i = 0; i < face.count; ++i) f.p[i] = c.pos + rotate(c.q, h.point(face, i));
+            f.count = face.count;
+            f.face = true;
+            f.normal = rotate(c.q, face.normal);
+            f.origin = f.p[0];
+            // With the corners going round counter-clockwise seen from outside, the outward direction
+            // across each side is (the side) x (the normal).
+            for (int i = 0; i < face.count; ++i) {
+                f.side[i] = cross(f.p[(i + 1) % face.count] - f.p[i], f.normal).normalized();
+                f.side_offset[i] = dot(f.side[i], f.p[i]);
+            }
+            f.u = (f.p[1] - f.p[0]).normalized();
+            f.v = cross(f.normal, f.u);
+            f.alignment = dot(face.normal, local);
+            f.code = 8 + static_cast<std::uint32_t>(best);
+        } else {
+            f.p[0] = c.core_support(d);  // a face with more corners than the clipping has room for: one point
+            f.count = 1;
+        }
     } else {
-        // A point core is its own feature. A hull is only a cloud of points here, with no record of its
-        // faces, so it offers its farthest vertex and gets a one-point contact.
+        // A point core is its own feature. A cloud of points that was never built into a hull has no
+        // faces to offer: it gives its farthest vertex and gets a one-point contact.
         f.p[0] = c.core == Convex::Core::Point ? c.pos : c.core_support(d);
         f.count = 1;
     }
@@ -455,38 +506,71 @@ bool clip_segment(ClipVertex& a, ClipVertex& b, Vec3 n, Real c, std::uint32_t pl
     return true;
 }
 
+// Scrambles the bits of x, so that contact ids built from several small numbers do not collide.
+std::uint32_t scramble(std::uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
 // The contact patch when one shape presents a face: clip the other shape's feature to the face's outline
-// and keep what has sunk below it. This is the box code's face_manifold with the incident "face" allowed to
-// be a segment or a single point, and with both shapes' rounding radii.
-int face_patch(const Feature& ref, Real ref_radius, const Feature& inc, Real inc_radius, bool ref_is_a, ContactPoint* out) {
-    ClipVertex buffer_a[16], buffer_b[16];
+// and keep what has sunk below it. This is the box code's face_manifold with the reference face allowed to
+// be any convex polygon, the incident "face" allowed to be a polygon, a segment or a single point, and
+// both shapes' rounding radii.
+int face_patch(const Feature& ref, Real ref_radius, const Feature& inc, Real inc_radius, ContactPoint* out) {
+    // Each clip can add a corner, so a polygon of up to 16 clipped by up to 16 sides needs room for 32.
+    ClipVertex buffer_a[2 * Feature::kMaxCorners], buffer_b[2 * Feature::kMaxCorners];
     ClipVertex *src = buffer_a, *dst = buffer_b;
     int count = inc.count;
     for (int i = 0; i < count; ++i) src[i] = {inc.p[i], static_cast<std::uint32_t>(i)};
 
-    const Vec3 side_normal[4] = {ref.u, -ref.u, ref.v, -ref.v};
-    const Real side_half[4] = {ref.hu, ref.hu, ref.hv, ref.hv};
-    for (std::uint32_t k = 0; k < 4 && count > 0; ++k) {
-        const Real limit = dot(side_normal[k], ref.center) + side_half[k] + kClipMargin;
+    for (int k = 0; k < ref.count && count > 0; ++k) {
+        const Vec3 outward = ref.side[k];
+        const Real limit = ref.side_offset[k] + kClipMargin;
+        const std::uint32_t plane = static_cast<std::uint32_t>(k);
         if (count == 2) {
-            if (!clip_segment(src[0], src[1], side_normal[k], limit, k)) count = 0;
+            if (!clip_segment(src[0], src[1], outward, limit, plane)) count = 0;
         } else if (count == 1) {
-            if (dot(side_normal[k], src[0].p) > limit) count = 0;
+            if (dot(outward, src[0].p) > limit) count = 0;
         } else {
-            count = clip_polygon(dst, src, count, side_normal[k], limit, k);
+            count = clip_polygon(dst, src, count, outward, limit, plane);
             std::swap(src, dst);
         }
     }
 
-    const std::uint32_t pair_code = (ref_is_a ? 0u : 1u << 30) | (ref.code << 25) | (inc.code << 21);
-    ContactPoint candidates[16];
+    const std::uint32_t pair_code = scramble(ref.code * 0x85ebca77u + inc.code * 0xc2b2ae3du);
+    ContactPoint candidates[2 * Feature::kMaxCorners];
     int found = 0;
     for (int i = 0; i < count; ++i) {
         // How far the incident shape's surface under this point is above the reference surface (both are
         // their radius out from the core). Negative: it has sunk in.
-        const Real gap = dot(ref.normal, src[i].p - ref.center) - ref_radius - inc_radius;
-        if (gap <= 0)
-            candidates[found++] = {src[i].p - ref.normal * (inc_radius + gap * static_cast<Real>(0.5)), -gap, pair_code | (src[i].tag & 0x1FFFFFu)};
+        const Real gap = dot(ref.normal, src[i].p - ref.origin) - ref_radius - inc_radius;
+        if (gap > 0) continue;
+        // The clipping planes sat a margin outside the face, so that a corner lying exactly on a side is
+        // kept as a corner. Bring such a point back onto the face proper. (At a sharp corner of the face
+        // the two margins meet well outside it: 2 mm becomes over a centimetre at 20 degrees.)
+        Vec3 on_face = src[i].p;
+        bool outside = false;
+        for (int k = 0; k < ref.count; ++k) outside = outside || dot(ref.side[k], on_face) > ref.side_offset[k];
+        if (outside) {
+            // The nearest point of the face's outline: the nearest point of each side in turn.
+            Real nearest = kRealMax;
+            for (int k = 0; k < ref.count; ++k) {
+                const Vec3 from = ref.p[k], along = ref.p[(k + 1) % ref.count] - from;
+                const Real t = std::clamp(dot(src[i].p - from, along) / along.length_sq(), Real(0), Real(1));
+                // (Measured in the face's plane: the incident point may be above or below it.)
+                Vec3 offset = src[i].p - (from + along * t);
+                offset -= ref.normal * dot(offset, ref.normal);
+                if (offset.length_sq() < nearest) {
+                    nearest = offset.length_sq();
+                    on_face = src[i].p - offset;
+                }
+            }
+        }
+        candidates[found++] = {on_face - ref.normal * (inc_radius + gap * static_cast<Real>(0.5)), -gap, scramble(pair_code + src[i].tag)};
     }
     found = reduce_to_four(candidates, found, ref.u, ref.v);
     for (int i = 0; i < found; ++i) out[i] = candidates[i];
@@ -510,13 +594,13 @@ bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
     // But when a flat face is what is touching, the contact is a patch, and a body resting on one point
     // would rock. Look at the feature each shape presents to the other along the normal.
     const Feature fa = facing_feature(a, hit.normal), fb = facing_feature(b, -hit.normal);
-    const bool face_a = fa.count == 4 && fa.alignment >= kFaceAligned, face_b = fb.count == 4 && fb.alignment >= kFaceAligned;
+    const bool face_a = fa.face && fa.alignment >= kFaceAligned, face_b = fb.face && fb.alignment >= kFaceAligned;
     if (face_a || face_b) {
         // If both present a face, a's is the reference unless b's is the squarer one by more than rounding
         // (so that two parallel faces do not swap roles from frame to frame).
         const bool ref_is_a = face_a && (!face_b || fa.alignment >= fb.alignment - static_cast<Real>(1e-6));
         ContactPoint patch[4];
-        const int found = ref_is_a ? face_patch(fa, a.radius, fb, b.radius, true, patch) : face_patch(fb, b.radius, fa, a.radius, false, patch);
+        const int found = ref_is_a ? face_patch(fa, a.radius, fb, b.radius, patch) : face_patch(fb, b.radius, fa, a.radius, patch);
         if (found > 0) {
             // The face's own normal, exactly, in place of EPA's (they agree to within the 0.8 degrees
             // above). The depth has to go with the normal: how far the two overlap along THIS direction,
@@ -527,7 +611,7 @@ bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
             m.count = found;
             for (int i = 0; i < found; ++i) m.points[i] = patch[i];
         }
-    } else if (fa.count == 2 && fb.count == 2) {
+    } else if (fa.count == 2 && fb.count == 2) {  // (a face has at least three corners: these are two segments)
         // Two capsules side by side: if their axes are (nearly) parallel the contact is the stretch where
         // they run alongside each other, and its two ends are the contact points. Each end is measured for
         // itself, from a's axis straight across to b's, since "nearly" parallel axes are not the same

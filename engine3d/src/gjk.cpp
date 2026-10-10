@@ -40,6 +40,11 @@ Convex Convex::hull(const Vec3* pts, int n, Vec3 p, Quat orientation, Real r) {
     c.radius = r;
     return c;
 }
+Convex Convex::hull(const Hull& built, Vec3 p, Quat orientation, Real r) {
+    Convex c = hull(built.vertices.data(), static_cast<int>(built.vertices.size()), p, orientation, r);
+    c.faces = &built;
+    return c;
+}
 Convex Convex::of(const Body& body) {
     switch (body.shape.type) {
         case Shape::Type::Sphere: return sphere(body.shape.radius, body.pos);
