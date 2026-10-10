@@ -641,7 +641,56 @@ their code is gone: a term in the contact id for which shape is the reference, a
 Not done: hulls are not bodies, so no simulation uses any of this yet. A hull face with more than 16
 corners falls back to a one-point contact.
 
+## Step 14: hulls as bodies
+
+`Body::solid_hull(points, count, density, origin, q)` builds the hull of the points, works out what a solid of
+that shape weighs and how it resists turning, and returns a body (or nothing, if the points enclose no
+volume). `Body::fixed_hull` is the immovable one. `Shape::Type::Hull` holds the hull by shared pointer, so a
+hundred copies of one shape share one hull.
+
+**Where the body is.** A body's `pos` is its centre of mass; everything in the engine assumes it. So the
+points may be given in any convenient frame, the caller says where that frame's origin goes, and the factory
+moves the hull's corners to be measured from the centroid and sets `pos` to where the centroid lands. The
+corners end up in the world exactly where they were asked to be.
+
+**Mass, centre and inertia** (`mass_properties` in `hull.hpp`). Cut the solid into tetrahedra, one from the
+origin to each triangle of each face. Their volumes are signed, so wherever the origin is, the parts outside
+the solid cancel. For a tetrahedron with corners 0, a, b, c:
+- volume `V = a . (b x c) / 6`, centre `(a + b + c) / 4`;
+- the integral of `x x^T` over it is `V / 20 * (a a^T + b b^T + c c^T + (a + b + c)(a + b + c)^T)`.
+Summing gives the second moment `S`; the inertia tensor is `trace(S) E - S`, moved to the centroid by taking
+away `V c c^T`. In double precision, because the pieces are large and mostly cancel. The tensor is generally
+not diagonal (a lopsided solid spun about one axis is thrown about the others), and the body keeps it as it
+is: nothing in the engine needed it diagonal.
+
+The rest is what every shape needs: a bounding box (the corners, turned), the radii the sweep uses (to the
+nearest face, to the farthest corner), `contains` (behind every face), and collision through `collide_convex`
+with the face contacts of step 13.
+
+Measured:
+- A box-shaped hull has the box's volume and inertia, at the origin and 75 units from it.
+- Prisms, an icosahedron, a tetrahedron and six random lumps match a count of 343000 little cells to 2% in
+  volume, centre and every entry of the tensor.
+- A tower of eight box-shaped hulls ends within 2 cm of a tower of boxes and sleeps.
+- A dropped regular tetrahedron rests on a face on three points with its centre `a sqrt(6) / 12` up; a
+  twenty-sided die thrown spinning ends on a face, its centre `g^2 / sqrt(3)` half-edges up.
+- A hexagonal prism stands on its end, and lying on a side does not roll.
+- 36 lumps, prisms and dice settle in a closed room. 150 fast spinning hulls at a 4 cm wall: none through or
+  stuck with the sweep, most through without.
+- A free lopsided hull's centre keeps to a straight line within a millimetre over four seconds.
+
+Tests (15, 243 in total). 26 deliberate breakages: 25 caught at first; the one that was not (density left
+out of the inertia) showed that the test only checked the mass at a density other than 1, and now it checks
+both. This step went in without a bug found, which after the last four is worth saying, and worth not
+trusting too far: the stress programs of steps 9 to 13 already exercise everything underneath it.
+
+In the demo, lumps and prisms fall in scene 3, drawn by their edges (one headless render).
+
+Not done: hull faces with more than 16 corners get one contact point; nothing reduces a hull with very many
+corners (support is a search through all of them).
+
 ## Planned next
 
-Hulls as bodies: the mass, centre of mass and inertia of a polyhedron, a bounding box, drawing; then piles
-of them.
+The 3D engine now has the 2D engine's features and general convex shapes. Open choices: more joints (slider,
+weld, cone limits), a hull-heavy demo scene and benchmark, or performance work (the solver and the narrow
+phase are both straightforward, not fast).

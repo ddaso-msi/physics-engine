@@ -282,6 +282,39 @@ bool build(const Vec3* points, int count, Hull& out) {
 
 }  // namespace
 
+MassProperties mass_properties(const Hull& hull) {
+    // In double precision, like the builder: the pieces are large and mostly cancel.
+    double volume = 0, first[3] = {0, 0, 0}, second[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    for (const Hull::Face& f : hull.faces)
+        for (int i = 1; i + 1 < f.count; ++i) {
+            const Vec a(hull.point(f, 0)), b(hull.point(f, i)), c(hull.point(f, i + 1));
+            const double v = dot(a, cross(b, c)) / 6;
+            const double corner[3][3] = {{a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}};
+            double sum[3];
+            for (int k = 0; k < 3; ++k) sum[k] = corner[0][k] + corner[1][k] + corner[2][k];
+            volume += v;
+            for (int k = 0; k < 3; ++k) {
+                first[k] += v * sum[k] / 4;
+                for (int l = 0; l < 3; ++l) {
+                    double outer = sum[k] * sum[l];
+                    for (const auto& p : corner) outer += p[k] * p[l];
+                    second[k][l] += v / 20 * outer;
+                }
+            }
+        }
+    MassProperties out;
+    if (!(volume > 0)) return out;
+    const double centre[3] = {first[0] / volume, first[1] / volume, first[2] / volume};
+    for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l) second[k][l] -= volume * centre[k] * centre[l];  // about the centroid
+    const double trace = second[0][0] + second[1][1] + second[2][2];
+    auto entry = [&](int k, int l) { return static_cast<Real>((k == l ? trace : 0) - second[k][l]); };
+    out.volume = static_cast<Real>(volume);
+    out.centroid = {static_cast<Real>(centre[0]), static_cast<Real>(centre[1]), static_cast<Real>(centre[2])};
+    out.inertia = Mat3{{entry(0, 0), entry(1, 0), entry(2, 0)}, {entry(0, 1), entry(1, 1), entry(2, 1)}, {entry(0, 2), entry(1, 2), entry(2, 2)}};
+    return out;
+}
+
 bool build_hull(const Vec3* points, int count, Hull& out) {
     out = Hull{};
     if (build(points, count, out)) return true;

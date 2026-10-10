@@ -36,6 +36,28 @@ Body Body::solid_capsule(Real half_length, Real radius, Real density, Vec3 posit
     return b;
 }
 
+std::optional<Body> Body::solid_hull(const Vec3* points, int count, Real density, Vec3 origin, Quat orientation) {
+    Hull hull;
+    if (!build_hull(points, count, hull)) return std::nullopt;
+    const MassProperties solid = mass_properties(hull);
+    // Measure the hull from its centre of mass from now on, which is what a body's shape is measured from.
+    for (Vec3& v : hull.vertices) v -= solid.centroid;
+    for (Hull::Face& f : hull.faces) f.offset -= dot(f.normal, solid.centroid);
+    orientation = orientation.normalized();
+    Body b = dynamic(density * solid.volume, solid.inertia * density, origin + rotate(orientation, solid.centroid), orientation);
+    b.shape = Shape::convex(std::make_shared<const Hull>(std::move(hull)));
+    return b;
+}
+
+std::optional<Body> Body::fixed_hull(const Vec3* points, int count, Vec3 origin, Quat orientation) {
+    std::optional<Body> b = solid_hull(points, count, 1, origin, orientation);
+    if (!b) return b;
+    b->type = BodyType::Static;
+    b->mass = b->inv_mass = 0;
+    b->inertia_body = b->inv_inertia_body = Mat3::diagonal(0, 0, 0);
+    return b;
+}
+
 Body Body::fixed(Vec3 position, Quat orientation) {
     Body b;
     b.type = BodyType::Static;

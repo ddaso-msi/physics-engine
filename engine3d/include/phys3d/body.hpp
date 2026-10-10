@@ -14,6 +14,7 @@
 #include "shapes.hpp"
 
 #include <algorithm>
+#include <optional>
 
 namespace phys3d {
 
@@ -67,6 +68,11 @@ struct Body {
     static Body fixed_box(Vec3 half_extents, Vec3 pos, Quat q = {});
     static Body fixed_sphere(Real radius, Vec3 pos);
     static Body fixed_capsule(Real half_length, Real radius, Vec3 pos, Quat q = {});
+    // A solid convex polyhedron: the hull of `count` points given in any convenient frame, which is placed in
+    // the world with its origin at `origin` and turned by `q`. The body's `pos` is, as always, its centre of
+    // mass, which is wherever the solid's shape puts it. Nothing if the points enclose no volume.
+    static std::optional<Body> solid_hull(const Vec3* points, int count, Real density, Vec3 origin, Quat q = {});
+    static std::optional<Body> fixed_hull(const Vec3* points, int count, Vec3 origin, Quat q = {});
 
     Transform transform() const { return {pos, q}; }
 
@@ -80,9 +86,11 @@ struct Body {
     // smallest one that contains it. A body that moves less than the first in a step cannot have passed
     // straight through anything; everything it can touch lies within the second.
     Real inscribed_radius() const {
+        if (shape.type == Shape::Type::Hull) return shape.hull_inscribed;
         return shape.type == Shape::Type::Box ? std::min({shape.half_extents.x, shape.half_extents.y, shape.half_extents.z}) : shape.radius;
     }
     Real bounding_radius() const {
+        if (shape.type == Shape::Type::Hull) return shape.hull_bounding;
         return shape.type == Shape::Type::Box ? shape.half_extents.length() : shape.radius + shape.half_length;  // (a sphere's half_length is 0)
     }
     Mat3 inertia_world() const { return to_world_frame(to_mat3(q), inertia_body); }

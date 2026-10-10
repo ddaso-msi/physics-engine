@@ -39,6 +39,21 @@ struct Hull {
     int edge_count() const { return static_cast<int>(loops.size()) / 2; }
 };
 
+// What a solid of uniform density 1 filling the hull weighs and how it resists turning.
+struct MassProperties {
+    Real volume = 0;
+    Vec3 centroid;  // the centre of mass
+    Mat3 inertia;   // about the centroid, for density 1 (multiply by the density)
+};
+// By cutting the solid into tetrahedra, one from the origin to each triangle of each face. Volumes are
+// signed, so the pieces that lie outside the solid cancel exactly, wherever the origin is. For one such
+// tetrahedron with corners 0, a, b, c:
+//     volume              V = a . (b x c) / 6
+//     centre of mass      (a + b + c) / 4
+//     integral of x x^T   V / 20 * (a a^T + b b^T + c c^T + (a + b + c)(a + b + c)^T)
+// and the inertia tensor is trace(S) E - S for the summed second moment S, moved to the centroid.
+MassProperties mass_properties(const Hull& hull);
+
 // Builds the hull of `count` points. Points inside the hull, on its faces or along its edges do not become
 // vertices. Returns false, leaving `out` empty, if the points do not enclose a volume (fewer than four, or
 // all in one plane, to within a hundred-thousandth of their spread).

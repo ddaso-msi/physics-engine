@@ -1,6 +1,6 @@
 // Wireframe demo for the 3D engine (phys3d). Everything is drawn as lines through a perspective camera:
 // boxes as their 12 edges, spheres as three circles fixed in the sphere's own frame (so you can see it spin),
-// capsules as two rings, four side lines and arcs over the ends,
+// capsules as two rings, four side lines and arcs over the ends, hulls as their edges,
 // contacts as a yellow dot with a green normal, joints in orange (hinge axes in yellow). Lines further away are dimmer; nothing is hidden.
 //
 //   left-drag  orbit the camera          wheel  zoom
@@ -75,6 +75,24 @@ void add_random_bodies(World& w, Lcg& rng, int count, float height) {
             Body b = Body::solid_sphere(rng.range(0.3f, 0.55f), 1, pos);
             b.restitution = 0.3f;
             w.add(b);
+        } else if (i % 6 == 4) {
+            // A lump: the hull of a dozen random points. Or, every other time, a prism with 3 to 8 sides.
+            std::vector<Vec3> points;
+            if (i % 12 == 4) {
+                for (int k = 0; k < 12; ++k) points.push_back({rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f)});
+            } else {
+                const int sides = 3 + static_cast<int>(rng.next() * 6);
+                for (int k = 0; k < sides; ++k) {
+                    const float a = 2 * kPi * static_cast<float>(k) / static_cast<float>(sides);
+                    points.push_back({0.45f * std::cos(a), -0.3f, 0.45f * std::sin(a)});
+                    points.push_back({0.45f * std::cos(a), 0.3f, 0.45f * std::sin(a)});
+                }
+            }
+            const Quat q = Quat::from_axis_angle({rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)}, rng.range(0, 3));
+            if (std::optional<Body> b = Body::solid_hull(points.data(), static_cast<int>(points.size()), 1, pos, q)) {
+                b->restitution = 0.1f;
+                w.add(*b);
+            }
         } else if (i % 3 == 1) {
             const Quat q = Quat::from_axis_angle({rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)}, rng.range(0, 3));
             Body b = Body::solid_capsule(rng.range(0.25f, 0.6f), rng.range(0.2f, 0.35f), 1, pos, q);
@@ -308,6 +326,14 @@ struct Painter {
             line(apply(b.transform(), side + Vec3{0, -h, 0}), apply(b.transform(), side + Vec3{0, h, 0}), c);
     }
 
+    // A hull: every side of every face (each edge twice, once from each of its two faces).
+    void hull(const Body& b, SDL_Color c) const {
+        const Hull& h = *b.shape.hull;
+        for (const Hull::Face& f : h.faces)
+            for (int i = 0; i < f.count; ++i)
+                if (h.corner(f, i) < h.corner(f, i + 1)) line(apply(b.transform(), h.point(f, i)), apply(b.transform(), h.point(f, i + 1)), c);
+    }
+
     void grid() const {
         const SDL_Color c{60, 64, 78, 255};
         for (int i = -10; i <= 10; i += 2) {
@@ -336,6 +362,7 @@ void draw_world(SDL_Renderer* ren, const World& w, const Camera& cam, bool show_
                                                          : SDL_Color{120, 200, 255, 255};
         if (b.shape.type == Shape::Type::Box) paint.box(b, c);
         else if (b.shape.type == Shape::Type::Capsule) paint.capsule(b, c);
+        else if (b.shape.type == Shape::Type::Hull) paint.hull(b, c);
         else paint.sphere(b, c);
     }
     // Joints: a line from each body's centre to its anchor (the two anchors coincide unless the joint has

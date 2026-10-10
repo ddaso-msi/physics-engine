@@ -49,6 +49,7 @@ Convex Convex::of(const Body& body) {
     switch (body.shape.type) {
         case Shape::Type::Sphere: return sphere(body.shape.radius, body.pos);
         case Shape::Type::Capsule: return capsule(body.shape.half_length, body.shape.radius, body.pos, body.q);
+        case Shape::Type::Hull: return hull(*body.shape.hull, body.pos, body.q);
         default: return box(body.shape.half_extents, body.pos, body.q);
     }
 }
