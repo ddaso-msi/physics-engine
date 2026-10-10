@@ -4,35 +4,37 @@
 
 namespace phys3d {
 
-namespace {
-// Radius of a sphere around the centre of mass that contains the whole shape.
-Real bounding_radius(const Body& b) {
-    return b.shape.type == Shape::Type::Sphere ? b.shape.radius : b.shape.half_extents.length();
-}
-}  // namespace
-
 void World::step(Real dt) {
     const std::vector<ContactPair> previous = std::move(contacts_);
     contacts_.clear();
 
-    // Every pair: O(n^2), with a bounding-sphere test to skip the far-apart ones cheaply.
-    const int n = static_cast<int>(bodies.size());
-    for (int i = 0; i < n; ++i) {
-        const Body& a = bodies[static_cast<size_t>(i)];
-        const Real ra = bounding_radius(a);
-        for (int j = i + 1; j < n; ++j) {
-            const Body& b = bodies[static_cast<size_t>(j)];
-            if (a.inv_mass == 0 && b.inv_mass == 0) continue;  // two immovable bodies never interact
-            const Real reach = ra + bounding_radius(b);
-            if ((b.pos - a.pos).length_sq() > reach * reach) continue;
-            ContactPair pair;
-            if (collide(a, b, pair.manifold)) {
-                pair.a = i;
-                pair.b = j;
-                contacts_.push_back(pair);
-            }
+    // Broad phase. Both algorithms return the same pairs (the tree, a superset) in the same order.
+    const size_t n = bodies.size();
+    boxes_.resize(n);
+    immovable_.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        boxes_[i] = compute_aabb(bodies[i]);
+        immovable_[i] = bodies[i].inv_mass == 0;
+    }
+    PairList candidates;
+    if (broadphase == BroadphaseKind::BruteForce) {
+        candidates = brute_force_pairs(boxes_, immovable_, &stats_.broadphase_tests);
+    } else {
+        candidates = tree_.find_pairs(boxes_, immovable_);
+        stats_.broadphase_tests = tree_.last_tests();
+    }
+    stats_.candidate_pairs = candidates.size();
+
+    // Narrow phase.
+    for (const IndexPair& pair : candidates) {
+        ContactPair contact;
+        if (collide(bodies[static_cast<size_t>(pair.a)], bodies[static_cast<size_t>(pair.b)], contact.manifold)) {
+            contact.a = pair.a;
+            contact.b = pair.b;
+            contacts_.push_back(contact);
         }
     }
+    stats_.contacts = contacts_.size();
     transfer_impulses(previous, contacts_);
 
     for (Body& b : bodies) b.integrate_velocity(dt, gravity, gyroscopic);

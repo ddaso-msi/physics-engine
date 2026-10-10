@@ -6,6 +6,7 @@
 //   1 tower   2 pyramid   3 mixed rain   4 slope (friction and rolling)   5 tumble (zero gravity)
 //   Space  shoot a ball from the camera   F  drop 10 more random bodies
 //   W  warm starting on/off   - / =  fewer / more solver sweeps   G  gyroscopic term: implicit / explicit / off
+//   B  broad phase: tree / brute force
 //   C  show contacts   H  hide/show text   Tab  pause   Backspace or R  reload the scene   Esc  quit
 //
 // Headless capture (for checking a scene without a window):
@@ -29,7 +30,7 @@ using demo3d::ScreenPoint;
 namespace {
 
 constexpr int kWidth = 960, kHeight = 640;
-constexpr size_t kMaxBodies = 400;  // the 3D world still tests every pair
+constexpr size_t kMaxBodies = 1200;  // a debug build gets slow well before this
 constexpr Real kDt = 1.0f / 120.0f;
 
 enum class Scene { Tower = 1, Pyramid, Rain, Slope, Tumble };
@@ -287,6 +288,9 @@ int main(int argc, char** argv) {
                                                                                        : Gyroscopic::Implicit;
                         break;
                     case SDLK_F: add_random_bodies(world, rng, 10, 6.0f); break;
+                    case SDLK_B:
+                        world.broadphase = world.broadphase == BroadphaseKind::DynamicTree ? BroadphaseKind::BruteForce : BroadphaseKind::DynamicTree;
+                        break;
                     case SDLK_SPACE:
                         if (world.bodies.size() < kMaxBodies) {
                             Body shot = Body::solid_sphere(0.35f, 3, cam.eye() + cam.forward() * 1.5f);
@@ -324,6 +328,10 @@ int main(int argc, char** argv) {
                                       paused ? " | PAUSED" : "");
             SDL_RenderDebugTextFormat(renderer, 16, 44, "W warm starting: %s | -/= sweeps: %d | G gyroscopic: %s | C contacts",
                                       world.solver.warm_starting ? "on" : "OFF", world.solver.iterations, gyro_name(world.gyroscopic));
+            SDL_RenderDebugTextFormat(renderer, 16, 60, "B broad phase: %s | %llu box tests -> %d candidate pairs -> %d contacts",
+                                      world.broadphase == BroadphaseKind::DynamicTree ? "tree" : "brute force",
+                                      static_cast<unsigned long long>(world.stats().broadphase_tests),
+                                      static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
         }
         if (capture) {
             SDL_Surface* surf = SDL_RenderReadPixels(renderer, nullptr);

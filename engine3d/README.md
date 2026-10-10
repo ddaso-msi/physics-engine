@@ -175,7 +175,48 @@ from the camera, `F` drops ten more bodies, `W` and `-`/`=` change warm starting
 
 For checking without a window: `SDL_VIDEODRIVER=dummy demo3d --scene 2 --steps 240 --capture out.bmp`.
 
+## Step 6: broad phase (`aabb.hpp`, `dynamic_tree.hpp`, `broadphase.hpp`)
+
+The world no longer runs the narrow phase on every pair. Each body gets an AABB (for a turned box the extent
+along world axis i is `sum_j |R_ij| h_j`), and `World::broadphase` picks how candidate pairs are found:
+
+- **BruteForce**: every pair of AABBs. The reference.
+- **DynamicTree** (the default): the 2D engine's balanced AABB tree, ported unchanged apart from the box type
+  and its cost (surface area in place of perimeter). Boxes are stored padded by 10 cm and re-inserted only
+  when a body escapes its padding; each movable body queries the tree.
+
+As in 2D, both return pairs sorted by `(a, b)` and never a pair of two immovable bodies, so a scene steps
+bit-for-bit identically with either (tested over 360 steps of a pyramid with balls). There is no sweep and
+prune in 3D.
+
+Measured (`-O2`, ms):
+
+| scene | bodies | brute force | tree |
+|---|---|---|---|
+| broad phase alone, boxes scattered at constant density | 2000 | 6.10 | 0.83 |
+| | 5000 | 28.97 | 3.38 |
+| | 10000 | (skipped) | 8.01 |
+| whole `World::step`, crates settled in a closed room | 1000 | 1.78 | 1.94 |
+| | 2000 | 3.94 | 6.43 |
+
+So the tree is 7 to 9 times faster where bodies are spread out, and that gap widens with size. In a dense
+settled pile it is no faster up to 1000 bodies and slower at 2000, even though it does a third as many
+comparisons: a brute-force test is six comparisons on contiguous memory, a tree visit chases a pointer, and
+in a pile every padded box overlaps its neighbours so queries cannot prune much (374 node visits per body at
+2000). The same thing showed up in 2D. The tree is the default because it is the one that scales; for a single
+dense pile of a thousand bodies brute force is as good. Improving the tree's quality in piles (a bulk
+rebuild, smaller padding for resting bodies) is not done.
+
+Tests (10, 99 in total): AABBs of spheres and turned boxes, tight around all eight corners for 300 random
+orientations; overlap, contains and merge checked along each axis separately; the tree stays valid and
+balanced through 4000 random inserts, moves and removals and answers queries exactly like a linear scan; the
+tree broad phase finds every real overlap while bodies jitter, teleport, vanish and appear; its work grows
+sub-quadratically; the simulation is identical with either broad phase. 13 deliberate breakages are each caught.
+
+The demo's body cap is now 1200, `B` switches the broad phase, and the readout shows box tests, candidate
+pairs and confirmed contacts.
+
 ## Planned next
 
-A 3D broad phase (the world tests every pair, so it is limited to a few hundred bodies), GJK/EPA for general
-convex shapes, and joints, sleeping and continuous collision ported from the 2D designs.
+GJK/EPA for general convex shapes, and joints, sleeping and continuous collision ported from the 2D designs
+(a fast shot can still tunnel through a thin body in 3D).
