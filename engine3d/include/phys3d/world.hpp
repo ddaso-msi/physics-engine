@@ -16,6 +16,11 @@ enum class BroadphaseKind {
     DynamicTree,  // padded AABBs in a balanced tree (the default)
 };
 
+enum class NarrowPhase {
+    Specialised,  // the routines written for each pair of shapes (sphere and box): the default
+    Convex,       // GJK and EPA through collide_convex(), which knows shapes only by their support functions
+};
+
 // What the last step did, for the demo's readout and for tests.
 struct StepStats {
     std::size_t candidate_pairs = 0;     // pairs the broad phase handed to the narrow phase
@@ -33,6 +38,7 @@ public:
     SolverSettings solver;
     Gyroscopic gyroscopic = Gyroscopic::Implicit;
     BroadphaseKind broadphase = BroadphaseKind::DynamicTree;
+    NarrowPhase narrowphase = NarrowPhase::Specialised;
     std::vector<Body> bodies;
     std::vector<Joint> joints;
 
@@ -94,6 +100,10 @@ public:
 
 private:
     void continuous_collision();
+    // The narrow phase, by whichever method `narrowphase` selects.
+    bool collide_pair(const Body& a, const Body& b, Manifold& out) const {
+        return narrowphase == NarrowPhase::Convex ? collide_convex(Convex::of(a), Convex::of(b), out) : collide(a, b, out);
+    }
 
     std::vector<ContactPair> contacts_;
     std::vector<Vec3> prev_pos_;  // poses before this step's movement, for the continuous pass

@@ -101,7 +101,7 @@ void World::step(Real dt) {
         if (!a.is_active() && !b.is_active()) continue;
         if (!no_collide_.empty() && no_collide_.count(pair_key(pair.a, pair.b))) continue;
         ContactPair contact;
-        if (collide(a, b, contact.manifold)) {
+        if (collide_pair(a, b, contact.manifold)) {
             contact.a = pair.a;
             contact.b = pair.b;
             contacts_.push_back(contact);
@@ -229,7 +229,7 @@ void World::continuous_collision() {
             probe.pos = p0 + (p1 - p0) * t;
             probe.q = blend(q0, q1, t);
             Manifold m;
-            *touching = i < wall_index ? collide(probe, wall, m) : collide(wall, probe, m);
+            *touching = i < wall_index ? collide_pair(probe, wall, m) : collide_pair(wall, probe, m);
             return *touching ? m.depth : Real(0);
         };
 
@@ -246,7 +246,7 @@ void World::continuous_collision() {
                 Body probe = body;
                 probe.pos = p0;
                 probe.q = q0;
-                touching = i < s ? collide(probe, wall, start) : collide(wall, probe, start);
+                touching = i < s ? collide_pair(probe, wall, start) : collide_pair(wall, probe, start);
             }
             if (!touching) {
                 // Clear at the start: find where it first overlaps.

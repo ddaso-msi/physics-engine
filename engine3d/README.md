@@ -402,6 +402,59 @@ final code, all are caught except one line: the "still overlapping after being p
 Not done: wiring this into `collide()` and the world, which needs contact MANIFOLDS (GJK/EPA give one point;
 a box resting on a face needs four) and the new shapes as bodies with mass and inertia.
 
+## Step 10: contact manifolds from GJK and EPA (`collide_convex` in `collision.hpp`)
+
+GJK and EPA answer with a normal, a depth and ONE point. A box resting on one point rocks, so the solver
+needs the whole patch. `collide_convex(a, b, manifold)` keeps the `collide()` contract (normal from a to b,
+up to four points, each halfway through the overlap, each with an id) for any two `Convex` shapes, and
+`World::narrowphase = NarrowPhase::Convex` sends every pair, and the continuous-collision sweep, through it.
+The default is still the per-shape code.
+
+How the patch is built: each shape offers the **feature** it presents to the other along the normal. A box
+offers the face that faces that way most squarely, a capsule its axis, a sphere its centre.
+- If a box face is what is touching (the normal is within 0.8 degrees of the face's own), that face is the
+  reference: the other shape's feature (a face, a segment or a point) is clipped to the face's outline, and
+  what has sunk below the face is the patch. This is the box code's face clipping with the incident "face"
+  allowed to be a segment or a point, and with both shapes' rounding radii. A capsule lying on a box gets a
+  point under each end; tilted, only the lower end is below the face, so it gets one.
+- Two capsules with (nearly) parallel axes get the two ends of the stretch where they run side by side,
+  each end measured across for itself.
+- Anything else (a corner, crossed edges, anything round) meets at a point: EPA's.
+
+Two things that had to be got right:
+- **The depth goes with the normal.** A face manifold uses the face's own normal in place of EPA's, and the
+  two can differ by a fraction of a degree. Keeping EPA's depth with the face's normal understated the
+  overlap, by up to 2.5 cm in 14600 of 300000 nearly-aligned pairs. The depth is now recomputed along the
+  normal actually used, from the support functions. My first tests did not notice: I had the face tolerance
+  at 2.5 degrees, tightened it for another reason, and the symptom shrank below the test's tolerance while
+  the cause stayed. A targeted stress found it and the audit now checks it directly.
+- **How loosely "a face is touching" is judged.** At 2.5 degrees a face that was not the real contact could
+  take over and report a deeper overlap than the true one. When a face really is touching, EPA's normal
+  is that face's normal to rounding, so the tolerance can be tight.
+
+Measured against the code that knows the shapes:
+- 20000 random box pairs: the two always agree on hit or miss. Where they choose the same normal (77% of
+  hits), the points and depths match in all but 3 of 10089. Where they do not, it is the box code's
+  preference for face axes against EPA's true minimum.
+- Sphere-sphere and sphere-box: the same point, depth and normal.
+- A tower of 8 crates ends in the same place to four decimals on either path and sleeps. A closed room of 120
+  mixed boxes and balls settles alike; the convex path costs 0.112 ms a step against 0.084 (release).
+
+Tests (17, 189 in total): the patch for each kind of contact (box on box, overhanging an edge, capsule
+flat, tilted, upright and overhanging, capsules side by side, crossed and end to end, a rounded box); the
+comparisons above; an audit of 6000 shallow contacts between spheres, boxes, capsules and rounded boxes (each
+point inside both shapes, depths consistent, ids distinct, moving out by the depth separates the pair); ids
+that survive a small movement and change when a box rests on a different face; and in the world: the tower,
+a settling pile, friction on a slope, a fast box stopped at a thin wall, and the switch itself. Of 37
+deliberate breakages 30 were caught at first. Five showed gaps, now tested (among them the depth above);
+two changed nothing even on 300000 targeted pairs and the code they guarded is gone.
+
+In the demo `N` switches the narrow phase. Not tried by hand.
+
+Not done, and the reason hulls come next: a hull here is a cloud of points with no record of its faces, so
+it offers only its farthest vertex and gets a one-point contact. A hull resting on a face would rock.
+Capsules have full manifolds but are not bodies yet (no mass, inertia, bounding box or drawing).
+
 ## Planned next
 
-Contact manifolds from GJK/EPA, then capsules and convex hulls as bodies in the world.
+Capsules as bodies; then a convex hull builder (so hulls know their faces) and hulls as bodies.

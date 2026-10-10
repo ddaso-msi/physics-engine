@@ -8,7 +8,7 @@ Planned stages: math, integration, rigid bodies, narrow-phase collision (SAT + c
 response with friction, sequential-impulse solver with warm starting, broadphase, joints, sleeping
 and CCD. A 3D version follows once the 2D engine is done.
 
-**3D (in progress, branch `3d`):** a separate engine in `engine3d/` with its own notes in [engine3d/README.md](engine3d/README.md): math, rigid bodies with gyroscopic integration, sphere and box collision, a solver that stacks, a broad phase, sleeping, continuous collision, joints, GJK/EPA for general convex shapes (not yet used by the world), and a wireframe demo (`./build/debug/demo3d/demo3d`).
+**3D (in progress, branch `3d`):** a separate engine in `engine3d/` with its own notes in [engine3d/README.md](engine3d/README.md): math, rigid bodies with gyroscopic integration, sphere and box collision, a solver that stacks, a broad phase, sleeping, continuous collision, joints, GJK/EPA for general convex shapes with contact manifolds (selectable in the world; capsules and hulls are not bodies yet), and a wireframe demo (`./build/debug/demo3d/demo3d`).
 
 Status: stages 0-9 done (build setup, 2D math, integrators + fixed timestep, rigid body state + shapes, narrow-phase collision, contact response, warm starting + contact persistence, broad phase, joints, sleeping + continuous collision + scene gallery).
 

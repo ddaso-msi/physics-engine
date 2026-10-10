@@ -7,6 +7,7 @@
 //   6 chains, a bridge and a spring (ball and distance joints)   7 hinges: a door, a flail, a motor
 //   Space  shoot a ball from the camera   F  drop 10 more random bodies
 //   W  warm starting on/off   - / =  fewer / more solver sweeps   G  gyroscopic term: implicit / explicit / off
+//   N  narrow phase: per-shape routines / GJK and EPA
 //   B  broad phase: tree / brute force   S  sleeping on/off (sleepers are drawn dim)   K  continuous collision on/off
 //   C  show contacts   H  hide/show text   Tab  pause   Backspace or R  reload the scene   Esc  quit
 //
@@ -389,6 +390,9 @@ int main(int argc, char** argv) {
                     case SDLK_B:
                         world.broadphase = world.broadphase == BroadphaseKind::DynamicTree ? BroadphaseKind::BruteForce : BroadphaseKind::DynamicTree;
                         break;
+                    case SDLK_N:
+                        world.narrowphase = world.narrowphase == NarrowPhase::Convex ? NarrowPhase::Specialised : NarrowPhase::Convex;
+                        break;
                     case SDLK_SPACE:
                         if (world.bodies.size() < kMaxBodies) {
                             Body shot = Body::solid_sphere(0.35f, 3, cam.eye() + cam.forward() * 1.5f);
@@ -426,10 +430,11 @@ int main(int argc, char** argv) {
                                       paused ? " | PAUSED" : "");
             SDL_RenderDebugTextFormat(renderer, 16, 44, "W warm starting: %s | -/= sweeps: %d | G gyroscopic: %s | C contacts",
                                       world.solver.warm_starting ? "on" : "OFF", world.solver.iterations, gyro_name(world.gyroscopic));
-            SDL_RenderDebugTextFormat(renderer, 16, 60, "B broad phase: %s | %llu box tests -> %d candidate pairs -> %d contacts",
+            SDL_RenderDebugTextFormat(renderer, 16, 60, "B broad phase: %s | %llu box tests -> %d candidate pairs -> %d contacts | N narrow phase: %s",
                                       world.broadphase == BroadphaseKind::DynamicTree ? "tree" : "brute force",
                                       static_cast<unsigned long long>(world.stats().broadphase_tests),
-                                      static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts));
+                                      static_cast<int>(world.stats().candidate_pairs), static_cast<int>(world.stats().contacts),
+                                      world.narrowphase == NarrowPhase::Convex ? "GJK/EPA" : "per shape");
             SDL_RenderDebugTextFormat(renderer, 16, 76, "S sleep: %s (%d awake, %d islands) | K continuous collision: %s (%d swept, %d stopped)",
                                       world.allow_sleep ? "on" : "OFF", static_cast<int>(world.stats().awake_bodies),
                                       static_cast<int>(world.stats().islands), world.continuous ? "on" : "OFF",

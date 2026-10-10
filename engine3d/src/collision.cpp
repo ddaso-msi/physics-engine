@@ -387,7 +387,178 @@ bool collide_boxes(const Body& body_a, const Body& body_b, Manifold& out) {
     return true;
 }
 
+// ---------------------------------------------------------------------------------------------
+// any two convex shapes, by GJK and EPA
+// ---------------------------------------------------------------------------------------------
+
+// The flat piece of a shape's core that faces a given direction: a point (a sphere's centre, a hull's
+// farthest vertex), a segment (a capsule's axis) or a rectangle (the face of a box that faces that way most
+// squarely).
+struct Feature {
+    Vec3 p[4];
+    int count = 0;  // 1, 2 or 4 (corners in order round the face)
+    // For a face:
+    Vec3 center, normal, u, v;  // normal is outward; u and v lie in the face
+    Real hu = 0, hv = 0;        // half the face's size along u and v
+    Real alignment = 0;         // how squarely it faces the direction asked for: 1 is exactly
+    std::uint32_t code = 7;     // which face of the box (axis and side), for contact ids; 7 = not a face
+};
+
+Feature facing_feature(const Convex& c, Vec3 d) {
+    Feature f;
+    if (c.core == Convex::Core::Segment) {
+        const Vec3 h = rotate(c.q, {0, c.half.y, 0});
+        f.p[0] = c.pos - h;
+        f.p[1] = c.pos + h;
+        f.count = 2;
+    } else if (c.core == Convex::Core::Box) {
+        const Mat3 r = to_mat3(c.q);
+        const Vec3 axis[3] = {r.cx, r.cy, r.cz};
+        int k = 0;
+        for (int i = 1; i < 3; ++i)
+            if (std::fabs(dot(axis[i], d)) > std::fabs(dot(axis[k], d))) k = i;
+        const bool negative = dot(axis[k], d) < 0;
+        f.normal = negative ? -axis[k] : axis[k];
+        f.alignment = std::fabs(dot(axis[k], d));
+        f.u = axis[(k + 1) % 3];
+        f.v = axis[(k + 2) % 3];
+        f.hu = c.half[(k + 1) % 3];
+        f.hv = c.half[(k + 2) % 3];
+        f.center = c.pos + f.normal * c.half[k];
+        const Vec3 eu = f.u * f.hu, ev = f.v * f.hv;
+        f.p[0] = f.center + eu + ev;
+        f.p[1] = f.center - eu + ev;
+        f.p[2] = f.center - eu - ev;
+        f.p[3] = f.center + eu - ev;
+        f.count = 4;
+        f.code = static_cast<std::uint32_t>(k) * 2 + (negative ? 1u : 0u);
+    } else {
+        // A point core is its own feature. A hull is only a cloud of points here, with no record of its
+        // faces, so it offers its farthest vertex and gets a one-point contact.
+        f.p[0] = c.core == Convex::Core::Point ? c.pos : c.core_support(d);
+        f.count = 1;
+    }
+    return f;
+}
+
+// A face counts as "the" contact feature when the contact normal is within about 0.8 degrees of its own.
+// When a face really is what is touching, EPA's normal IS that face's normal to rounding, so this need not
+// be generous; and it must not be, because the manifold takes the face's normal in place of EPA's.
+constexpr Real kFaceAligned = static_cast<Real>(0.9999);
+
+// Keeps the part of segment (a, b) where dot(n, p) <= c. False if nothing is left.
+bool clip_segment(ClipVertex& a, ClipVertex& b, Vec3 n, Real c, std::uint32_t plane) {
+    const Real da = dot(n, a.p) - c, db = dot(n, b.p) - c;
+    if (da > 0 && db > 0) return false;
+    if (da > 0) a = {a.p + (b.p - a.p) * (da / (da - db)), 500u + a.tag * 8u + plane};
+    if (db > 0) b = {b.p + (a.p - b.p) * (db / (db - da)), 500u + b.tag * 8u + plane};
+    return true;
+}
+
+// The contact patch when one shape presents a face: clip the other shape's feature to the face's outline
+// and keep what has sunk below it. This is the box code's face_manifold with the incident "face" allowed to
+// be a segment or a single point, and with both shapes' rounding radii.
+int face_patch(const Feature& ref, Real ref_radius, const Feature& inc, Real inc_radius, bool ref_is_a, ContactPoint* out) {
+    ClipVertex buffer_a[16], buffer_b[16];
+    ClipVertex *src = buffer_a, *dst = buffer_b;
+    int count = inc.count;
+    for (int i = 0; i < count; ++i) src[i] = {inc.p[i], static_cast<std::uint32_t>(i)};
+
+    const Vec3 side_normal[4] = {ref.u, -ref.u, ref.v, -ref.v};
+    const Real side_half[4] = {ref.hu, ref.hu, ref.hv, ref.hv};
+    for (std::uint32_t k = 0; k < 4 && count > 0; ++k) {
+        const Real limit = dot(side_normal[k], ref.center) + side_half[k] + kClipMargin;
+        if (count == 2) {
+            if (!clip_segment(src[0], src[1], side_normal[k], limit, k)) count = 0;
+        } else if (count == 1) {
+            if (dot(side_normal[k], src[0].p) > limit) count = 0;
+        } else {
+            count = clip_polygon(dst, src, count, side_normal[k], limit, k);
+            std::swap(src, dst);
+        }
+    }
+
+    const std::uint32_t pair_code = (ref_is_a ? 0u : 1u << 30) | (ref.code << 25) | (inc.code << 21);
+    ContactPoint candidates[16];
+    int found = 0;
+    for (int i = 0; i < count; ++i) {
+        // How far the incident shape's surface under this point is above the reference surface (both are
+        // their radius out from the core). Negative: it has sunk in.
+        const Real gap = dot(ref.normal, src[i].p - ref.center) - ref_radius - inc_radius;
+        if (gap <= 0)
+            candidates[found++] = {src[i].p - ref.normal * (inc_radius + gap * static_cast<Real>(0.5)), -gap, pair_code | (src[i].tag & 0x1FFFFFu)};
+    }
+    found = reduce_to_four(candidates, found, ref.u, ref.v);
+    for (int i = 0; i < found; ++i) out[i] = candidates[i];
+    return found;
+}
+
 }  // namespace
+
+bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
+    const ClosestResult hit = closest(a, b);
+    if (hit.distance > 0) return false;
+
+    // GJK and EPA give the direction and depth of the contact and one point of it. That is the whole
+    // answer when the shapes meet at a point (a corner, two crossed edges, anything round).
+    Manifold m;
+    m.normal = hit.normal;
+    m.depth = -hit.distance;
+    m.count = 1;
+    m.points[0] = {(hit.point_a + hit.point_b) * static_cast<Real>(0.5), m.depth, 0x80000000u};
+
+    // But when a flat face is what is touching, the contact is a patch, and a body resting on one point
+    // would rock. Look at the feature each shape presents to the other along the normal.
+    const Feature fa = facing_feature(a, hit.normal), fb = facing_feature(b, -hit.normal);
+    const bool face_a = fa.count == 4 && fa.alignment >= kFaceAligned, face_b = fb.count == 4 && fb.alignment >= kFaceAligned;
+    if (face_a || face_b) {
+        // If both present a face, a's is the reference unless b's is the squarer one by more than rounding
+        // (so that two parallel faces do not swap roles from frame to frame).
+        const bool ref_is_a = face_a && (!face_b || fa.alignment >= fb.alignment - static_cast<Real>(1e-6));
+        ContactPoint patch[4];
+        const int found = ref_is_a ? face_patch(fa, a.radius, fb, b.radius, true, patch) : face_patch(fb, b.radius, fa, a.radius, false, patch);
+        if (found > 0) {
+            // The face's own normal, exactly, in place of EPA's (they agree to within the 0.8 degrees
+            // above). The depth has to go with the normal: how far the two overlap along THIS direction,
+            // which the support functions give directly. (It can exceed every point's depth: the deepest
+            // corner of the other shape may hang outside the face's outline.)
+            m.normal = ref_is_a ? fa.normal : -fb.normal;
+            m.depth = dot(m.normal, a.support(m.normal) - b.support(-m.normal));
+            m.count = found;
+            for (int i = 0; i < found; ++i) m.points[i] = patch[i];
+        }
+    } else if (fa.count == 2 && fb.count == 2) {
+        // Two capsules side by side: if their axes are (nearly) parallel the contact is the stretch where
+        // they run alongside each other, and its two ends are the contact points. Each end is measured for
+        // itself, from a's axis straight across to b's, since "nearly" parallel axes are not the same
+        // distance apart at both ends.
+        const Vec3 mid_a = (fa.p[0] + fa.p[1]) * static_cast<Real>(0.5), along = (fa.p[1] - fa.p[0]).normalized();
+        const Vec3 b0 = fb.p[0], b_axis = fb.p[1] - fb.p[0];
+        const Real half_a = distance(fa.p[0], fa.p[1]) * static_cast<Real>(0.5);
+        if (cross(along, b_axis.normalized()).length() < static_cast<Real>(0.02) && half_a > 0) {
+            const Real t0 = dot(fb.p[0] - mid_a, along), t1 = dot(fb.p[1] - mid_a, along);
+            const Real lo = std::max(std::min(t0, t1), -half_a), hi = std::min(std::max(t0, t1), half_a);
+            ContactPoint ends[2];
+            int found = 0;
+            for (const Real t : {lo, hi}) {
+                const Vec3 on_a = mid_a + along * t;
+                const Vec3 on_b = b0 + b_axis * (dot(on_a - b0, b_axis) / b_axis.length_sq());
+                const Real apart = distance(on_a, on_b), depth = a.radius + b.radius - apart;
+                if (depth < 0 || apart == 0) continue;
+                const Vec3 across = (on_b - on_a) / apart;
+                ends[found] = {on_a + across * (a.radius - depth * static_cast<Real>(0.5)), depth, 0x40000000u + static_cast<std::uint32_t>(found)};
+                ++found;
+            }
+            if (found == 2 && hi - lo > static_cast<Real>(1e-3) * half_a) {
+                m.count = 2;
+                m.points[0] = ends[0];
+                m.points[1] = ends[1];
+            }
+        }
+    }
+    out = m;
+    return true;
+}
 
 bool collide(const Body& a, const Body& b, Manifold& out) {
     using Type = Shape::Type;
