@@ -258,6 +258,16 @@ from the poses the previous correction left. My first version built every joint'
 all the fixes, and in a chain the shared link received both fixes and overshot: a settled rope bridge
 that should hold to a millimetre had a 25 cm gap. Contacts still use Baumgarte for overlap; joints do not.
 
+*Correction:* "one joint at a time" was not enough; it has to be one **row** at a time. The rows of a
+single joint share its two bodies, and I was still correcting all of them from one measurement. With a
+hinge at its limit that goes wrong: closing the pin turns the arm off the limit, turning it back opens
+the pin, and the two overshoot against each other without settling. An arm dropped onto its lower limit
+came to hang a few degrees above the stop with the pin pulled apart, and because it was "not at the
+limit" nothing stopped its speed building up. I found it while writing the same joint for the 3D engine;
+a sweep of 108 arms (three lengths, thicknesses, limits and timesteps) had 56 failing in 2D. The limit
+test here had only checked how far the arm swung, never where it came to rest. Each row is now measured
+again after the one before it; all 108 rest on the stop, pinned, and that sweep is a test.
+
 Tests: every row's Jacobian is checked against a numerical derivative of the constraint it represents
 (including a prismatic joint with the bodies slid off the anchor, where one term only shows up), plus
 closed forms: a pinned disc swings with the physical-pendulum period (`T0 (1 + theta^2/16 + ...)`, within

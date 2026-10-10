@@ -127,10 +127,10 @@ private:
 
 // Position correction. Run after the bodies have been moved: shifts the bodies' positions and angles
 // directly to remove whatever joint error is left (each correction moves them by at most 20 cm / 8
-// degrees). Velocities are not touched, so this cannot add energy. Joints are corrected ONE AT A TIME,
-// each from the poses the previous correction left behind (Gauss-Seidel): in a chain every link is
-// shared by two joints, and correcting them all from the same starting poses would apply both
-// corrections to the shared link and overshoot.
+// degrees). Velocities are not touched, so this cannot add energy. Rows are corrected ONE AT A TIME,
+// each measured from the poses the previous correction left behind (Gauss-Seidel): in a chain every
+// link is shared by two joints, and within a joint every row shares the same two bodies, so correcting
+// several from the same starting poses applies all their corrections to a shared body and overshoots.
 void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings);
 
 }  // namespace phys
