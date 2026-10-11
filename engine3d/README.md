@@ -689,8 +689,73 @@ In the demo, lumps and prisms fall in scene 3, drawn by their edges (one headles
 Not done: hull faces with more than 16 corners get one contact point; nothing reduces a hull with very many
 corners (support is a search through all of them).
 
+## Step 15: where the time goes
+
+Nothing so far was written to be fast, and nobody knew what it cost. `bench3d/phys3d_bench` drops bodies
+into a closed room, lets them settle with sleeping off (so every body is simulated every step), and reports
+the time per step and per phase; `StepStats` now carries the phase times. Four scenes: crates, mixed shapes
+(spheres, boxes, capsules, hulls), hulls only, and chains of ball-jointed links.
+
+First numbers, 1000 bodies, release build, ms per step at 120 Hz:
+
+| scene | step | broad | narrow | solver |
+|---|---|---|---|---|
+| crates, per-shape code | 5.1 | 3.4 | 0.55 | 1.1 |
+| crates, GJK/EPA | 5.3 | 1.6 | 2.6 | 1.1 |
+| mixed | 6.0 | 3.3 | 1.7 | 1.0 |
+| hulls | 9.8 | 3.3 | 5.3 | 1.1 |
+| chains (1000 links) | 1.9 | 0.45 | 0 | 0.56, and 0.86 in the position pass |
+
+**The broad phase was the biggest cost, and worse than doing nothing clever.** At 1000 crates the tree
+visited 694 nodes per body: more than brute force's 500 box tests. Three causes, three changes.
+- *A lived-in tree is a bad tree.* Bodies fall, and each is taken out and re-inserted many times on the way.
+  Every re-insertion is placed as well as it can be in the tree as it stands, and nothing revisits the
+  choices made around it. The same boxes inserted fresh needed 200 visits. The tree now has `rebuild()`:
+  keep the leaves, split them in halves at the median along the direction they are most spread, and again
+  for each half. The broad phase calls it once a quarter of the leaves have been re-inserted (waiting for
+  all of them cost two to four times the work; rebuilding on every single re-insertion gained under a
+  tenth more). A pile at rest re-inserts nothing and never pays.
+- *One question per body repeats the same walk.* Asking "who overlaps this box?" for each body starts at the
+  root every time. `for_each_overlapping_pair` asks the tree about itself once: the pairs inside a node are
+  the pairs inside each child plus those between the two children, and two subtrees whose boxes do not
+  overlap are dismissed with one comparison however many leaves they hold. 694 visits per body became about
+  60 pair tests.
+- *The padding's extra pairs went to the narrow phase.* They are now checked against the real boxes first, so
+  the tree returns exactly the brute-force list.
+
+**The convex narrow phase did work it threw away.** Profiled on a settled pile of hulls: 0.94 of the 1.06
+microseconds per candidate pair was in `closest()`, and about half of that for touching pairs was the second
+GJK run that finds the deepest points (step 9). A face contact never looks at those points. `closest` can now
+leave them out, and `collide_convex` asks for them only when it ends up with a one-point contact.
+
+After, same scenes and machine:
+
+| scene | step | broad | narrow | solver |
+|---|---|---|---|---|
+| crates, per-shape code | 1.9 | 0.33 | 0.42 | 1.2 |
+| crates, GJK/EPA | 3.3 | 0.40 | 1.7 | 1.2 |
+| mixed | 2.8 | 0.45 | 1.3 | 1.1 |
+| hulls | 6.2 | 0.62 | 4.3 | 1.2 |
+| chains | 1.9 | 0.32 | 0 | 0.58, and 0.93 in the position pass |
+
+The machine was not idle for either set, and two runs of one scene differed by up to a factor of two in the
+broad phase before the changes; the improvement there is well outside that. At 2000 bodies: crates 4.4 ms,
+mixed 6.7, hulls 12.5.
+
+What is left, in order of size:
+- The GJK/EPA narrow phase, 0.9 microseconds per candidate pair, is most of a hull scene. It starts from
+  nothing every step; starting from last step's answer for the pair is the usual remedy.
+- The solver, 33 ns per contact point per sweep, is most of a crate scene.
+- The joint position pass costs more than the joint solver. It rebuilds all of a joint's rows for each row
+  it corrects, which is what made it correct in step 8.
+
+Tests (3, 246 in total): the tree asked about itself returns exactly the brute-force pairs, on sparse, dense
+and piled-up boxes, before and after a rebuild; a rebuild keeps every leaf's id and box, halves the work on
+a tree that 600 boxes have settled through, and gives the same tree twice; the broad phase rebuilds only
+after a quarter of the bodies have moved. 21 deliberate breakages: 19 caught. One showed a line that could
+never matter and is gone. The other is the rule that breaks ties by leaf id when splitting at the median: it
+is there so that the tree is the same on every machine, which a test on one machine cannot show.
+
 ## Planned next
 
-The 3D engine now has the 2D engine's features and general convex shapes. Open choices: more joints (slider,
-weld, cone limits), a hull-heavy demo scene and benchmark, or performance work (the solver and the narrow
-phase are both straightforward, not fast).
+Starting GJK from last step's answer; or more joints (slider, weld, cone limits).

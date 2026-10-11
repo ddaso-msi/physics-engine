@@ -77,6 +77,8 @@ struct ClosestResult {
     // Apart: the closest point of each surface. Overlapping: the deepest point of each, so that
     // point_b + normal * depth == point_a.
     Vec3 point_a, point_b;
+    bool has_points = true;  // false only after closest(a, b, false) on shapes whose cores overlap
+    Real size = 0;           // (the shapes' size as sampled, kept for find_deepest_points)
     int gjk_iterations = 0;
     int epa_iterations = 0;  // 0 unless the cores overlapped
     // False if an iteration cap or a degenerate polytope stopped the search early; the answer is then the
@@ -84,7 +86,10 @@ struct ClosestResult {
     bool converged = true;
 };
 
-ClosestResult closest(const Convex& a, const Convex& b);
+// `with_points` false skips the search for point_a and point_b when the cores overlap (about half the work
+// in that case), for a caller that may not need them; find_deepest_points fills them in later if it does.
+ClosestResult closest(const Convex& a, const Convex& b, bool with_points = true);
+void find_deepest_points(const Convex& a, const Convex& b, ClosestResult& result);
 
 // The two small geometric routines GJK is built from, exposed so they can be tested on their own.
 namespace detail {

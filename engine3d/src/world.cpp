@@ -1,6 +1,7 @@
 #include <phys3d/world.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -44,6 +45,14 @@ Quat blend(const Quat& q0, const Quat& q1, Real t) { return (q0 * (1 - t) + q1 *
 
 void World::step(Real dt) {
     const size_t n = bodies.size();
+    // Where the time goes, for the benchmark: each lap() adds the time since the last one to a phase.
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point mark = Clock::now();
+    auto lap = [&](double& phase_ms) {
+        const Clock::time_point now = Clock::now();
+        phase_ms = std::chrono::duration<double, std::milli>(now - mark).count();
+        mark = now;
+    };
 
     // 0. Anything that disturbs a sleeper wakes it: a force or torque, or a velocity someone set.
     for (Body& b : bodies) {
@@ -84,6 +93,8 @@ void World::step(Real dt) {
     for (const Joint& j : joints)
         if (!j.collide_connected && j.a >= 0 && j.b >= 0) no_collide_.insert(pair_key(j.a, j.b));
 
+    lap(stats_.ms_broadphase);
+
     // 2. Narrow phase. A pair where neither body is being simulated cannot change, so it is not recomputed...
     for (const IndexPair& pair : candidates) {
         const Body& a = bodies[static_cast<size_t>(pair.a)];
@@ -107,6 +118,8 @@ void World::step(Real dt) {
         }
     }
     transfer_impulses(previous, contacts_);
+
+    lap(stats_.ms_narrowphase);
 
     // 3. Islands. A contact or a joint between two dynamic bodies links them; static bodies link nothing (a floor of
     //    separate piles is not one island).
@@ -134,10 +147,13 @@ void World::step(Real dt) {
             c.dormant = false;
     stats_.contacts = static_cast<size_t>(std::count_if(contacts_.begin(), contacts_.end(), [](const ContactPair& c) { return !c.dormant; }));
 
+    lap(stats_.ms_islands);
+
     // 4-6. Forces, constraints, movement.
     for (Body& b : bodies)
         if (b.awake) b.integrate_velocity(dt, gravity, gyroscopic);
     solve_constraints(bodies, contacts_, joints, dt, solver);
+    lap(stats_.ms_solver);
     prev_pos_.resize(n);
     prev_q_.resize(n);
     for (size_t i = 0; i < n; ++i) {
@@ -148,10 +164,14 @@ void World::step(Real dt) {
         if (b.awake) b.integrate_position(dt);
     solve_joint_positions(bodies, joints, solver);
 
+    lap(stats_.ms_movement);
+
     // 7. Continuous collision.
     stats_.ccd_swept = 0;
     stats_.ccd_hits = 0;
     if (continuous) continuous_collision();
+
+    lap(stats_.ms_sweep);
 
     // 8. Sleep. A body is "still" while it is slower than both thresholds; an island sleeps when its most
     //    restless member has been still long enough.
@@ -179,6 +199,7 @@ void World::step(Real dt) {
         }
     }
     stats_.awake_bodies = static_cast<size_t>(std::count_if(bodies.begin(), bodies.end(), [](const Body& b) { return b.is_active(); }));
+    lap(stats_.ms_sleep);
 }
 
 // The 2D engine's sweep (see phys/world.cpp for the full reasoning), in 3D. A body that moves or turns far

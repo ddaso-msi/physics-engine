@@ -439,63 +439,74 @@ Penetration epa(const Pair& pair, Simplex s) {
 
 }  // namespace
 
-ClosestResult closest(const Convex& a, const Convex& b) {
-    const Pair pair{a, b, a.pos};
-    ClosestResult out;
-    Simplex s;
-    Real core_distance = 0;
-    Vec3 shift;  // how far b's core was moved before the closest points were measured
+namespace {
 
-    const bool cores_overlap = gjk(pair, s, out.gjk_iterations, out.converged);
-    if (cores_overlap) {
-        const Penetration p = epa(pair, s);
-        out.epa_iterations = p.iterations;
-        out.converged = out.converged && p.converged;
-        out.normal = p.normal;
-        core_distance = -p.depth;
-
-        // Where are the deepest points? EPA's nearest face could tell us, but only when the face it stopped
-        // on happens to contain the foot of the perpendicular from the origin, and a flat side of A - B is
-        // covered by several triangles (or, right at the start, by part of one). So ask the question GJK
-        // answers reliably instead: pull b out along the normal until the cores are just clear, and take
-        // the closest points of that pair.
-        // "Just clear" is a thousandth of the shapes' size. (Sized from the sampled points of the shapes
-        // themselves: the samples of A - B can all sit at the origin when the cores only touch.)
-        Real size_sq = p.depth * p.depth;
-        for (int i = 0; i < s.n; ++i) size_sq = std::max({size_sq, s.v[i].a.length_sq(), s.v[i].b.length_sq()});
-        const Real clearance = static_cast<Real>(1e-3) * std::sqrt(size_sq);
-        shift = p.normal * (p.depth + clearance);
-        Convex moved = b;
-        moved.pos += shift;
-        int extra = 0;
-        bool extra_converged = true;
-        // The pulled-apart pair should be exactly `clearance` apart. If GJK says otherwise (or says they
-        // still overlap), one of the two runs stopped early on rounding: seen once in two million pairs.
-        // The depth and normal still hold, but the points may be a few millimetres out, so say so.
-        if (gjk(Pair{a, moved, a.pos}, s, extra, extra_converged) ||
-            std::fabs(dot(direction_to(s), s.v[0].w) - clearance) > static_cast<Real>(0.5) * clearance)
-            out.converged = false;
-        out.converged = out.converged && extra_converged;
-        out.gjk_iterations += extra;
-    }
-
+// From the cores to the rounded shapes: each surface is its radius further out along the normal.
+void place_points(const Convex& a, const Convex& b, const Simplex& s, Vec3 shift, ClosestResult& out) {
     Vec3 core_a, core_b;
     for (int i = 0; i < s.n; ++i) {
         core_a += s.v[i].a * s.weight[i];
         core_b += s.v[i].b * s.weight[i];
     }
-    core_b -= shift;
-    if (!cores_overlap) {
-        // Apart from the start. The nearest point of A - B to the origin is (a point of a) - (a point of
-        // b), so it points from b back to a, and its length is the distance.
-        const Vec3 toward_a = direction_to(s);
-        out.normal = -toward_a;
-        core_distance = dot(toward_a, s.v[0].w);
+    out.point_a = a.pos + core_a + out.normal * a.radius;
+    out.point_b = a.pos + core_b - shift - out.normal * b.radius;
+    out.has_points = true;
+}
+
+}  // namespace
+
+void find_deepest_points(const Convex& a, const Convex& b, ClosestResult& out) {
+    if (out.has_points) return;
+    // Where are the deepest points? EPA's nearest face could tell us, but only when the face it stopped on
+    // happens to contain the foot of the perpendicular from the origin, and a flat side of A - B is covered
+    // by several triangles (or, right at the start, by part of one). So ask the question GJK answers
+    // reliably instead: pull b out along the normal until the cores are just clear, and take the closest
+    // points of that pair. "Just clear" is a thousandth of the shapes' size.
+    const Real core_depth = -(out.distance + a.radius + b.radius);
+    const Real clearance = static_cast<Real>(1e-3) * std::max(out.size, core_depth);
+    const Vec3 shift = out.normal * (core_depth + clearance);
+    Convex moved = b;
+    moved.pos += shift;
+    Simplex s;
+    int extra = 0;
+    bool extra_converged = true;
+    // The pulled-apart pair should be exactly `clearance` apart. If GJK says otherwise (or says they still
+    // overlap), one of the two runs stopped early on rounding: seen once in two million pairs. The depth
+    // and normal still hold, but the points may be a few millimetres out, so say so.
+    if (gjk(Pair{a, moved, a.pos}, s, extra, extra_converged) ||
+        std::fabs(dot(direction_to(s), s.v[0].w) - clearance) > static_cast<Real>(0.5) * clearance)
+        out.converged = false;
+    out.converged = out.converged && extra_converged;
+    out.gjk_iterations += extra;
+    place_points(a, b, s, shift, out);
+}
+
+ClosestResult closest(const Convex& a, const Convex& b, bool with_points) {
+    const Pair pair{a, b, a.pos};
+    ClosestResult out;
+    Simplex s;
+    if (gjk(pair, s, out.gjk_iterations, out.converged)) {
+        // How big the shapes are, for the tolerance used if the deepest points are asked for: the farthest
+        // of the points of either that GJK sampled, measured from a's position. (Not the samples of A - B
+        // themselves, which can all sit at the origin when the cores only touch.)
+        Real size_sq = 0;
+        for (int i = 0; i < s.n; ++i) size_sq = std::max({size_sq, s.v[i].a.length_sq(), s.v[i].b.length_sq()});
+        out.size = std::sqrt(size_sq);
+        const Penetration p = epa(pair, s);
+        out.epa_iterations = p.iterations;
+        out.converged = out.converged && p.converged;
+        out.normal = p.normal;
+        out.distance = -p.depth - a.radius - b.radius;
+        out.has_points = false;
+        if (with_points) find_deepest_points(a, b, out);
+        return out;
     }
-    // From the cores to the rounded shapes: each surface is its radius further out along the normal.
-    out.distance = core_distance - a.radius - b.radius;
-    out.point_a = pair.origin + core_a + out.normal * a.radius;
-    out.point_b = pair.origin + core_b - out.normal * b.radius;
+    // Apart. The nearest point of A - B to the origin is (a point of a) - (a point of b), so it points from
+    // b back to a, and its length is the distance.
+    const Vec3 toward_a = direction_to(s);
+    out.normal = -toward_a;
+    out.distance = dot(toward_a, s.v[0].w) - a.radius - b.radius;
+    place_points(a, b, s, {}, out);
     return out;
 }
 

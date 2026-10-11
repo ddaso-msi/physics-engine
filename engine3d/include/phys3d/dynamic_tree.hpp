@@ -24,6 +24,12 @@ public:
     // Replaces the proxy's box (remove and re-insert).
     void move_proxy(int proxy, const AABB& box);
 
+    // Throws away the tree's shape and builds a new one over the same leaves (proxy ids and boxes are
+    // kept): split the leaves into two halves at the median along the direction they are most spread out,
+    // and do the same to each half. A tree grown one insertion at a time is only as good as each insertion
+    // could make it in the tree that was there; this one is laid out with every leaf in view.
+    void rebuild();
+
     const AABB& box(int proxy) const { return nodes_[static_cast<size_t>(proxy)].box; }
     int user(int proxy) const { return nodes_[static_cast<size_t>(proxy)].user; }
 
@@ -43,6 +49,46 @@ public:
             } else {
                 stack[top++] = node.child1;
                 stack[top++] = node.child2;
+            }
+        }
+    }
+
+    // Calls callback(user_a, user_b) once for every pair of leaves whose boxes overlap.
+    //
+    // Asking the tree "who overlaps this box?" once per leaf starts every question at the root and walks
+    // down through the same upper nodes again and again. Asking the tree about ITSELF does the work once:
+    // two subtrees whose boxes do not overlap cannot hold an overlapping pair between them, and are
+    // dismissed with one comparison however many leaves they hold. The pairs inside a node are the pairs
+    // inside each child plus the pairs between the two children; the pairs between two nodes whose boxes
+    // overlap are found by splitting the bigger one and trying again.
+    template <class Callback>
+    void for_each_overlapping_pair(Callback&& callback) const {
+        if (root_ == kNull) return;
+        std::vector<PairTask>& stack = pair_stack_;
+        stack.clear();
+        stack.push_back({root_, kNull});
+        while (!stack.empty()) {
+            const PairTask task = stack.back();
+            stack.pop_back();
+            const Node& a = nodes_[static_cast<size_t>(task.a)];
+            if (task.b == kNull) {
+                if (a.is_leaf()) continue;
+                stack.push_back({a.child1, kNull});
+                stack.push_back({a.child2, kNull});
+                stack.push_back({a.child1, a.child2});
+                continue;
+            }
+            const Node& b = nodes_[static_cast<size_t>(task.b)];
+            ++visits_;
+            if (!overlap(a.box, b.box)) continue;
+            if (a.is_leaf() && b.is_leaf()) {
+                callback(a.user, b.user);
+            } else if (b.is_leaf() || (!a.is_leaf() && a.height >= b.height)) {
+                stack.push_back({a.child1, task.b});
+                stack.push_back({a.child2, task.b});
+            } else {
+                stack.push_back({task.a, b.child1});
+                stack.push_back({task.a, b.child2});
             }
         }
     }
@@ -76,6 +122,7 @@ private:
     static constexpr int kMaxStack = 256;
 
     int allocate_node();
+    int build_over(int* leaves, int count);
     void free_node(int node);
     void insert_leaf(int leaf);
     void remove_leaf(int leaf);
@@ -88,6 +135,13 @@ private:
     int free_list_ = kNull;
     int proxy_count_ = 0;
     mutable std::uint64_t visits_ = 0;
+    // Work still to do in for_each_overlapping_pair. b == kNull means "every pair inside a"; otherwise
+    // "every pair with one leaf under a and one under b". (Kept between calls to save allocating it.)
+    struct PairTask {
+        int a, b;
+    };
+    mutable std::vector<PairTask> pair_stack_;
+
 };
 
 }  // namespace phys3d

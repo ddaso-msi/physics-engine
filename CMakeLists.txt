@@ -24,6 +24,7 @@ enable_testing()
 add_subdirectory(tests)
 add_subdirectory(tests3d)
 add_subdirectory(bench)
+add_subdirectory(bench3d)
 
 find_package(SDL3 CONFIG QUIET)
 if(SDL3_FOUND)

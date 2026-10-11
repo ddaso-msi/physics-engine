@@ -46,6 +46,50 @@ void DynamicTree::move_proxy(int proxy, const AABB& box) {
     insert_leaf(proxy);
 }
 
+void DynamicTree::rebuild() {
+    std::vector<int> leaves;
+    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i) {
+        const Node& n = nodes_[static_cast<size_t>(i)];
+        if (n.height < 0) continue;  // already free
+        if (n.is_leaf()) leaves.push_back(i);
+        else free_node(i);
+    }
+    root_ = leaves.empty() ? kNull : build_over(leaves.data(), static_cast<int>(leaves.size()));
+}
+
+// Builds a subtree over `count` leaves and returns its root.
+int DynamicTree::build_over(int* leaves, int count) {
+    if (count == 1) return leaves[0];
+    auto centre = [&](int leaf) { return nodes_[static_cast<size_t>(leaf)].box.lo + nodes_[static_cast<size_t>(leaf)].box.hi; };  // (twice it: only the order matters)
+    Vec3 lo = centre(leaves[0]), hi = lo;
+    for (int i = 1; i < count; ++i) {
+        const Vec3 c = centre(leaves[i]);
+        for (int k = 0; k < 3; ++k) {
+            lo[k] = std::min(lo[k], c[k]);
+            hi[k] = std::max(hi[k], c[k]);
+        }
+    }
+    const Vec3 spread = hi - lo;
+    const int axis = spread.x >= spread.y && spread.x >= spread.z ? 0 : spread.y >= spread.z ? 1 : 2;
+    const int half = count / 2;
+    // The half with the smaller coordinates first. (Ties broken by leaf id, so the tree is the same on every
+    // run and every machine.)
+    std::nth_element(leaves, leaves + half, leaves + count, [&](int a, int b) {
+        const Real ca = centre(a)[axis], cb = centre(b)[axis];
+        return ca < cb || (ca == cb && a < b);
+    });
+    const int child1 = build_over(leaves, half), child2 = build_over(leaves + half, count - half);
+    const int node = allocate_node();  // (after the children: allocating may move the array)
+    Node& n = nodes_[static_cast<size_t>(node)];
+    n.child1 = child1;
+    n.child2 = child2;
+    n.box = merge(nodes_[static_cast<size_t>(child1)].box, nodes_[static_cast<size_t>(child2)].box);
+    n.height = 1 + std::max(nodes_[static_cast<size_t>(child1)].height, nodes_[static_cast<size_t>(child2)].height);
+    nodes_[static_cast<size_t>(child1)].parent = node;
+    nodes_[static_cast<size_t>(child2)].parent = node;
+    return node;
+}
+
 // Recompute the box and height of `node` and every ancestor, rebalancing on the way up.
 void DynamicTree::refit_upwards(int node) {
     while (node != kNull) {

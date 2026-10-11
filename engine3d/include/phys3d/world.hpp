@@ -30,6 +30,9 @@ struct StepStats {
     std::size_t islands = 0;             // groups of dynamic bodies connected by contacts or joints
     std::size_t ccd_swept = 0;           // bodies moving fast enough to be swept by the continuous pass
     std::size_t ccd_hits = 0;            // of those, how many it stopped at a static body
+    // Milliseconds the last step spent in each phase. (The solver's includes applying gravity; movement's
+    // includes the joint position pass; the narrow phase's includes matching contacts to last step's.)
+    double ms_broadphase = 0, ms_narrowphase = 0, ms_islands = 0, ms_solver = 0, ms_movement = 0, ms_sweep = 0, ms_sleep = 0;
 };
 
 class World {

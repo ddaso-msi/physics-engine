@@ -210,12 +210,108 @@ TEST(tree_broadphase_finds_every_overlap_as_bodies_move_appear_and_vanish_in_3d)
         const PairList expected = brute_force_pairs(boxes, imm);
         const PairList got = tree.find_pairs(boxes, imm);
         CHECK(is_superset(got, expected));
+        CHECK(got == expected);  // and nothing more: pairs that only the padding brought together are dropped
         CHECK(std::is_sorted(got.begin(), got.end()));
         CHECK(tree.tree().validate());
         CHECK(tree.tree().proxy_count() == static_cast<int>(boxes.size()));
         total_pairs += expected.size();
     }
     CHECK(total_pairs > 1000);  // the scene really had overlaps to find
+}
+
+TEST(a_tree_asked_about_itself_finds_exactly_the_overlapping_pairs_of_leaves) {
+    Lcg rng;
+    for (int trial = 0; trial < 40; ++trial) {
+        const int n = 1 + static_cast<int>(rng.next() * 300);
+        // Sparse, dense, and everything piled into one corner.
+        const Real extent = trial % 3 == 0 ? std::cbrt(8.0f * static_cast<Real>(n)) : trial % 3 == 1 ? 3.0f : 0.5f;
+        std::vector<AABB> boxes;
+        DynamicTree tree;
+        for (int i = 0; i < n; ++i) {
+            boxes.push_back(random_box(rng, extent));
+            tree.create_proxy(boxes.back(), i);
+        }
+        if (trial % 2) tree.rebuild();
+        PairList got;
+        tree.for_each_overlapping_pair([&](int a, int b) { got.push_back({std::min(a, b), std::max(a, b)}); });
+        std::sort(got.begin(), got.end());
+        CHECK(std::adjacent_find(got.begin(), got.end()) == got.end());  // each pair once
+        CHECK(got == brute_force_pairs(boxes, std::vector<std::uint8_t>(boxes.size(), 0)));
+    }
+    DynamicTree empty;
+    int calls = 0;
+    empty.for_each_overlapping_pair([&](int, int) { ++calls; });
+    empty.rebuild();
+    CHECK(calls == 0 && empty.validate());
+}
+
+TEST(rebuilding_a_tree_keeps_its_leaves_and_makes_it_cheaper_to_search) {
+    // A pile: 600 boxes that start spread through a tall column and come down, a little at a time, into a
+    // layer three deep on the floor. Every box is re-inserted many times on the way: a lived-in tree.
+    Lcg rng;
+    std::vector<AABB> boxes;
+    std::vector<Real> rest;
+    for (int i = 0; i < 600; ++i) {
+        const Vec3 c{rng.range(0, 14), rng.range(0, 60), rng.range(0, 14)}, h{rng.range(0.3f, 0.5f), rng.range(0.3f, 0.5f), rng.range(0.3f, 0.5f)};
+        boxes.push_back({c - h, c + h});
+        rest.push_back(rng.range(0.5f, 3));
+    }
+    DynamicTree tree;
+    std::vector<int> proxy;
+    for (size_t i = 0; i < boxes.size(); ++i) proxy.push_back(tree.create_proxy(boxes[i], static_cast<int>(i)));
+    for (int step = 0; step < 80; ++step)
+        for (size_t i = 0; i < boxes.size(); ++i) {
+            const Real middle = (boxes[i].lo.y + boxes[i].hi.y) * 0.5f, down = std::min(Real(1), std::max(Real(0), middle - rest[i]));
+            if (down == 0) continue;
+            boxes[i].lo.y -= down;
+            boxes[i].hi.y -= down;
+            tree.move_proxy(proxy[i], boxes[i]);
+        }
+    auto pair_tests = [&] {
+        const std::uint64_t before = tree.visits();
+        tree.for_each_overlapping_pair([](int, int) {});
+        return tree.visits() - before;
+    };
+    const std::uint64_t lived_in = pair_tests();
+    tree.rebuild();
+    CHECK(tree.validate());
+    CHECK(tree.proxy_count() == 600);
+    for (size_t i = 0; i < boxes.size(); ++i) {  // the same ids still name the same leaves
+        CHECK(tree.user(proxy[i]) == static_cast<int>(i));
+        CHECK(distance(tree.box(proxy[i]).lo, boxes[i].lo) == 0 && distance(tree.box(proxy[i]).hi, boxes[i].hi) == 0);
+    }
+    const std::uint64_t rebuilt = pair_tests();
+    CHECK(rebuilt * 10 < lived_in * 7);  // measured: half the work
+    CHECK(tree.height() <= 11);          // 600 leaves split in halves: ceil(log2(600)) = 10, and the root
+    // It can go on being used as before.
+    for (size_t i = 0; i < 100; ++i) tree.move_proxy(proxy[i], random_box(rng, 10));
+    tree.destroy_proxy(proxy[599]);
+    CHECK(tree.validate());
+    // And building twice gives the same tree: the same work to search it.
+    tree.rebuild();
+    const std::uint64_t once = pair_tests();
+    tree.rebuild();
+    CHECK(pair_tests() == once);
+}
+
+TEST(the_broadphase_rebuilds_its_tree_only_after_enough_bodies_have_moved) {
+    Lcg rng;
+    std::vector<AABB> boxes = uniform_scene(400, rng);
+    const std::vector<std::uint8_t> imm(boxes.size(), 0);
+    TreeBroadphase tree;
+    tree.find_pairs(boxes, imm);
+    const int after_creation = tree.rebuilds();
+    for (int frame = 0; frame < 20; ++frame) tree.find_pairs(boxes, imm);  // nothing moves
+    CHECK(tree.rebuilds() == after_creation);
+    // Throw 50 of the 400 somewhere else: an eighth, not yet enough.
+    for (size_t i = 0; i < 50; ++i) boxes[i] = random_box(rng, 10);
+    tree.find_pairs(boxes, imm);
+    CHECK(tree.last_moves() == 50 && tree.rebuilds() == after_creation);
+    // Another 60 makes it over a quarter.
+    for (size_t i = 50; i < 110; ++i) boxes[i] = random_box(rng, 10);
+    CHECK(tree.find_pairs(boxes, imm) == brute_force_pairs(boxes, imm));
+    CHECK(tree.rebuilds() == after_creation + 1);
+    CHECK(tree.tree().validate());
 }
 
 // Quadrupling the number of evenly spread bodies multiplies brute-force work by 16; the tree must do far better.

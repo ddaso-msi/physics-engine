@@ -580,16 +580,16 @@ int face_patch(const Feature& ref, Real ref_radius, const Feature& inc, Real inc
 }  // namespace
 
 bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
-    const ClosestResult hit = closest(a, b);
+    ClosestResult hit = closest(a, b, /*with_points=*/false);
     if (hit.distance > 0) return false;
 
-    // GJK and EPA give the direction and depth of the contact and one point of it. That is the whole
-    // answer when the shapes meet at a point (a corner, two crossed edges, anything round).
+    // GJK and EPA give the direction and depth of the contact. With one point of it, that is the whole
+    // answer when the shapes meet at a point (a corner, two crossed edges, anything round); the point is
+    // only looked for at the end, if nothing below has found a patch.
     Manifold m;
     m.normal = hit.normal;
     m.depth = -hit.distance;
-    m.count = 1;
-    m.points[0] = {(hit.point_a + hit.point_b) * static_cast<Real>(0.5), m.depth, 0x80000000u};
+    m.count = 0;
 
     // But when a flat face is what is touching, the contact is a patch, and a body resting on one point
     // would rock. Look at the feature each shape presents to the other along the normal.
@@ -639,6 +639,11 @@ bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
                 m.points[1] = ends[1];
             }
         }
+    }
+    if (m.count == 0) {
+        find_deepest_points(a, b, hit);
+        m.count = 1;
+        m.points[0] = {(hit.point_a + hit.point_b) * static_cast<Real>(0.5), m.depth, 0x80000000u};
     }
     out = m;
     return true;
