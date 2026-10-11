@@ -33,12 +33,17 @@ enum class JointType {
     Ball,      // pin two bodies together at one point; they may turn any way about it (a shoulder)
     Hinge,     // pin them together at a point AND keep them turning only about one axis (a door, a wheel);
                // optional angle limit and motor
+    Weld,      // hold them as one rigid piece: the point pinned and no relative turning at all
+    Slider,    // let b slide along an axis fixed in a, and nothing else (a rail, a piston); optional travel
+               // limit and motor
 };
 
 struct Joint {
     // One slot per row a joint can produce, so a row keeps its accumulated impulse from step to step even
     // when its neighbours (a limit that is not currently reached) come and go.
-    //   Distance: 0.   Ball: 0-2.   Hinge: 0-2 the point, 3-4 the axis, 5 the motor, 6-7 the limits.
+    //   Distance: 0.   Ball: 0-2 the point, 3 the cone.   Hinge: 0-2 the point, 3-4 the axis, 5 the motor,
+    //   6-7 the limits.   Weld: 0-2 the point, 3-5 the orientation.   Slider: 0-1 across the axis, 2-4 the
+    //   orientation, 5 the motor, 6-7 the limits.
     static constexpr int kMaxRows = 8;
 
     JointType type = JointType::Distance;
@@ -58,11 +63,23 @@ struct Joint {
     // copy has turned from a's about the axis, in (-pi, pi], zero where the joint was made.
     Vec3 local_axis_a{1, 0, 0}, local_axis_b{1, 0, 0};
     Vec3 local_ref_a{0, 1, 0}, local_ref_b{0, 1, 0};
-    bool enable_limit = false;  // keep the angle in [lower, upper]; both must lie inside (-pi, pi)
+    // Hinge: keep the angle in [lower, upper] (radians; both inside (-pi, pi)). Slider: keep the distance b
+    // has slid along the axis in [lower, upper] (zero where the joint was made).
+    bool enable_limit = false;
     Real lower = 0, upper = 0;
-    bool enable_motor = false;  // drive the angular speed of b relative to a, about the axis
+    // Hinge: drive the angular speed of b relative to a about the axis, with at most max_motor of torque.
+    // Slider: drive its sliding speed along the axis, with at most max_motor of force.
+    bool enable_motor = false;
     Real motor_speed = 0;
-    Real max_motor = 0;  // largest torque the motor may use
+    Real max_motor = 0;
+
+    // Weld and Slider: the orientation of b as seen from a when the joint was made, which they keep.
+    Quat relative_orientation;
+
+    // Ball: optionally keep b's copy of an axis within `cone_angle` of a's copy (a shoulder that cannot bend
+    // back on itself). Turning ABOUT the axis is not limited. Set with limit_cone().
+    bool enable_cone = false;
+    Real cone_angle = 0;
 
     // Solver state carried between steps.
     Real impulses[kMaxRows] = {};
@@ -72,13 +89,20 @@ struct Joint {
     static Joint distance(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor_a, Vec3 world_anchor_b);
     static Joint ball(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor);
     static Joint hinge(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor, Vec3 world_axis);
+    static Joint weld(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor);
+    static Joint slider(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor, Vec3 world_axis);
+    // For a ball joint: the axis, given as it points now, is remembered in both bodies' frames, and the two
+    // copies are then kept within `max_angle` (under pi) of each other.
+    void limit_cone(const std::vector<Body>& bodies, Vec3 world_axis, Real max_angle);
 
     // World-space position of each anchor now (for drawing and for measuring joint error).
     Vec3 world_anchor_a(const std::vector<Body>& bodies) const;
     Vec3 world_anchor_b(const std::vector<Body>& bodies) const;
-    // Hinge only: the axis as body a carries it, and the current angle.
+    // The axis as body a carries it (hinge, slider, a ball joint with a cone).
     Vec3 world_axis(const std::vector<Body>& bodies) const;
-    Real hinge_angle(const std::vector<Body>& bodies) const;
+    Real hinge_angle(const std::vector<Body>& bodies) const;  // hinge: the current angle
+    Real slide(const std::vector<Body>& bodies) const;        // slider: how far b has slid along the axis
+    Real cone_tilt(const std::vector<Body>& bodies) const;    // the angle between the two bodies' copies of the axis
 };
 
 // One scalar constraint row, fully prepared for this step. (Public so tests can check the Jacobians.)

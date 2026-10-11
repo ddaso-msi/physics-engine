@@ -756,6 +756,51 @@ after a quarter of the bodies have moved. 21 deliberate breakages: 19 caught. On
 never matter and is gone. The other is the rule that breaks ties by leaf id when splitting at the median: it
 is there so that the tree is the same on every machine, which a test on one machine cannot show.
 
+## Step 16: more joints (weld, slider, a cone for the ball joint)
+
+Three more, on the same rows and the same position pass as step 8.
+
+- **Weld**: two bodies held as one rigid piece. The ball joint's three point rows, and three more that
+  forbid any relative turning. The joint remembers b's orientation as seen from a when it was made
+  (`conj(q_a) q_b`). Whatever rotation takes that to what it is now is the error: a turn of some angle about
+  some axis, read off the quaternion, turned into the world frame, and shared out over three rows, one per
+  world axis.
+- **Slider**: b slides along an axis fixed in a, and nothing else. The weld's three orientation rows, two
+  rows across the axis, and along it a motor (a speed, with a force limit) and two end stops. A row along a
+  direction `e` that rides with body a measures `C = e . (pb - pa)`, and because `e` turns with a,
+  `dC/dt = e . (v_b + w_b x rb - v_a - w_a x ra) + (w_a x e) . d`: a's angular part has `ra + d` where a pin
+  joint's has `ra`. (The 2D prismatic joint has the same term.) That uses all eight row slots.
+- **Cone** on a ball joint (`limit_cone`): each body carries a copy of an axis, and the angle between the
+  copies may not exceed `cone_angle`. That angle grows when b turns relative to a about `a1 x b1`, so it is
+  one one-sided row about that direction, built like a hinge's limit. Turning about the axis itself is not
+  touched.
+
+A motor told to move wakes a sleeping slider, as it does a hinge.
+
+Measured:
+- Two welded bodies tumbling free: pin within 1 mm, relative orientation within a tenth of a degree, one
+  angular velocity between them, momentum kept.
+- A beam welded to the world at one end: the weld's stored impulses are the beam's weight (to 0.2%) and its
+  weight times the distance to its centre (to 0.5%).
+- A block on a rail tilted 0.6 rad, struck with velocity and spin mostly off the rail: it moves only along
+  it (2 mm, a fifth of a degree), at `g cos(0.6)` to 0.5%.
+- End stops hold, the lower one carrying exactly the block's weight. A motor at its force limit gives
+  `v = F t / m`, and lifts a load at 1.1 times its weight and not at 0.9.
+- The slider follows the 2D prismatic joint to a millimetre on a tilted rail with end stops.
+- An arm swung hard on a ball joint with a 0.5 rad cone goes out to 0.5 and no further, and the stop adds
+  no energy; swung gently it ends in the same place to 0.01 mm with the cone or without. Leaning on the cone
+  and spinning about its own length, it keeps its spin.
+
+Tests (12, 258 in total): the above, and every new row against a finite difference of the error it claims
+to be the rate of. The first run failed only where my tests were wrong (a step count; an energy tolerance
+tighter than the integrator's own wobble), which is exactly when a first-run pass means least, so: 30
+deliberate breakages, 29 caught. The one that was not is the line that reads a quaternion "the short way
+round": `q` and `-q` are the same orientation, and without it a body whose quaternion happens to be written
+the other way would look a full turn out of place. No test wrote one that way; one does now.
+
+Not done: a twist limit for the ball joint (the cone leaves twist free), a mouse joint, a fixed-distance
+"rope" with slack. No demo scene uses the new joints.
+
 ## Planned next
 
-Starting GJK from last step's answer; or more joints (slider, weld, cone limits).
+Starting GJK from last step's answer for each pair, the largest cost left in a hull scene.

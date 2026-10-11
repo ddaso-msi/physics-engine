@@ -604,3 +604,337 @@ TEST(a_ragdoll_arm_resting_on_the_floor_is_quiet) {
     CHECK(gap(w, elbow) < 2e-3f);
     CHECK(w.stats().awake_bodies == 0);  // came to rest and went to sleep
 }
+
+// ---- weld ----------------------------------------------------------------------------------------
+
+namespace {
+
+// The angle of the rotation that takes orientation `from` to `to`.
+Real turn_between(const Quat& from, const Quat& to) { return rotation_angle(to * conjugate(from)); }
+
+}  // namespace
+
+TEST(weld_and_slider_rows_match_the_rate_their_errors_change) {
+    const std::vector<Body> bodies = two_tumblers();
+    // Six rows for a weld: three for the orientation, three for the point.
+    check_rows_against_finite_differences(bodies, Joint::weld(bodies, 0, 1, {0.7f, 0.9f, 0.1f}), 6);
+    check_rows_against_finite_differences(bodies, Joint::weld(bodies, -1, 1, {0.7f, 0.9f, 0.1f}), 6);
+
+    // A slider: three for the orientation, two across the axis. Made, then b pushed well off the anchor,
+    // both along the rail and off it: one term of the rows only exists when the anchors are apart.
+    Joint slider = Joint::slider(bodies, 0, 1, {0.7f, 0.9f, 0.1f}, {1, -2, 0.5f});
+    std::vector<Body> apart = bodies;
+    apart[1].pos += Vec3{0.4f, -0.3f, 0.6f};
+    check_rows_against_finite_differences(apart, slider, 5);
+    // And with both ends of the rail passed, the two limit rows as well.
+    slider.enable_limit = true;
+    slider.lower = 5;
+    slider.upper = -5;
+    check_rows_against_finite_differences(apart, slider, 7);
+    CHECK_NEAR(slider.slide(apart), dot(Vec3{0.4f, -0.3f, 0.6f}, Vec3{1, -2, 0.5f}.normalized()), 1e-5);
+}
+
+TEST(two_welded_bodies_tumble_as_one) {
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    for (const Body& b : two_tumblers()) w.add(b);
+    const Quat relative = conjugate(w.bodies[0].q) * w.bodies[1].q;
+    const Vec3 offset = inv_rotate(w.bodies[0].q, w.bodies[1].pos - w.bodies[0].pos);  // b's centre, seen from a
+    const int weld = w.add_joint(Joint::weld(w.bodies, 0, 1, {0.7f, 0.9f, 0.1f}));
+    Vec3 p0, l0;
+    for (const Body& b : w.bodies) {
+        p0 += b.vel * b.mass;
+        l0 += cross(b.pos, b.vel) * b.mass + b.angular_momentum();
+    }
+    Real worst_gap = 0, worst_turn = 0, worst_shift = 0;
+    for (int i = 0; i < 240 * 4; ++i) {
+        w.step(kDt);
+        if (i < 5) continue;  // the first steps bring their different velocities into line
+        worst_gap = std::max(worst_gap, gap(w, weld));
+        worst_turn = std::max(worst_turn, turn_between(relative, conjugate(w.bodies[0].q) * w.bodies[1].q));
+        worst_shift = std::max(worst_shift, distance(offset, inv_rotate(w.bodies[0].q, w.bodies[1].pos - w.bodies[0].pos)));
+    }
+    CHECK(worst_gap < 1e-3f);
+    CHECK(worst_turn < 2e-3f);   // about a tenth of a degree
+    CHECK(worst_shift < 2e-3f);  // b stays where it was in a's frame
+    CHECK(distance(w.bodies[0].w, w.bodies[1].w) < 1e-3f);  // one body: one angular velocity
+    Vec3 p1, l1;
+    for (const Body& b : w.bodies) {
+        p1 += b.vel * b.mass;
+        l1 += cross(b.pos, b.vel) * b.mass + b.angular_momentum();
+    }
+    CHECK(distance(p0, p1) < 1e-3f * p0.length());
+    CHECK(distance(l0, l1) < 0.03f * l0.length());
+}
+
+TEST(a_weld_does_not_care_which_of_its_two_names_an_orientation_goes_by) {
+    // q and -q are the same orientation. Nothing may happen when a body's quaternion is swapped for its
+    // negative: read naively, the "difference" from where it should be would be a full turn.
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    for (Body b : two_tumblers()) {
+        b.vel = {};
+        b.w = {};
+        w.add(b);
+    }
+    w.add_joint(Joint::weld(w.bodies, 0, 1, {0.7f, 0.9f, 0.1f}));
+    w.add_joint(Joint::slider(w.bodies, -1, 0, {0, 0, 0}, {1, 0, 0}));
+    const Vec3 p0 = w.bodies[0].pos, p1 = w.bodies[1].pos;
+    const Quat q0 = w.bodies[0].q, q1 = w.bodies[1].q;
+    w.bodies[1].q = q1 * Real(-1);
+    w.bodies[0].q = q0 * Real(-1);
+    JointSolver solver;
+    solver.prepare(w.bodies, w.joints, kDt, SolverSettings{});
+    for (const JointRow& r : solver.rows()) CHECK_NEAR(r.error, 0, 1e-5);
+    run(w, 30);
+    CHECK(distance(w.bodies[0].pos, p0) < 1e-5f && distance(w.bodies[1].pos, p1) < 1e-5f);
+    CHECK(turn_between(q0, w.bodies[0].q) < 1e-4f && turn_between(q1, w.bodies[1].q) < 1e-4f);
+    CHECK(w.bodies[1].w.length() < 1e-5f);
+}
+
+TEST(a_beam_welded_to_the_world_holds_its_weight_and_its_torque) {
+    // A beam sticking out sideways from a weld at one end. The weld must supply an upward force equal to the
+    // weight, and a torque equal to the weight times the distance to the beam's centre.
+    World w;
+    w.allow_sleep = false;
+    const Real reach = 0.8f;
+    const int beam = w.add(Body::solid_box({reach, 0.1f, 0.1f}, 2, {reach, 0, 0}));
+    const int weld = w.add_joint(Joint::weld(w.bodies, -1, beam, {0, 0, 0}));
+    run(w, 480);
+    const Body& b = w.bodies[static_cast<size_t>(beam)];
+    CHECK(distance(b.pos, Vec3{reach, 0, 0}) < 1e-3f);
+    CHECK(turn_between(Quat{}, b.q) < 1e-3f);
+    const Joint& j = w.joints[static_cast<size_t>(weld)];
+    const Real weight = b.mass * kG * kDt;
+    CHECK_NEAR(j.impulses[1], weight, 2e-3 * weight);                  // the point's y row: the weight
+    CHECK_NEAR(j.impulses[5], weight * reach, 5e-3 * weight * reach);  // the orientation's z row: the torque
+    CHECK_NEAR(j.impulses[0], 0, 1e-3 * weight);
+    CHECK_NEAR(j.impulses[3], 0, 1e-3 * weight);
+    CHECK_NEAR(j.impulses[4], 0, 1e-3 * weight);
+}
+
+// ---- slider --------------------------------------------------------------------------------------
+
+TEST(a_body_on_a_slider_only_slides) {
+    // A rail tilted 0.6 rad from straight down. Along it, gravity's share is g cos(0.6); across it, and in
+    // turning, nothing is allowed, whatever the body is hit with.
+    World w;
+    w.allow_sleep = false;
+    const Vec3 axis{std::sin(0.6f), -std::cos(0.6f), 0};
+    const int block = w.add(Body::solid_box({0.2f, 0.3f, 0.25f}, 1, {1, 5, 2}, Quat::from_axis_angle({1, 2, 3}, 0.7f)));
+    const Quat start = w.bodies[0].q;
+    const int rail = w.add_joint(Joint::slider(w.bodies, -1, block, {1.1f, 5.2f, 1.9f}, axis));  // anchored off its centre
+    w.bodies[0].vel = {2, 1, -3};  // mostly not along the rail
+    w.bodies[0].w = {3, -2, 4};
+    const Real along0 = dot(Vec3{2, 1, -3}, axis);
+    Real worst_off_axis = 0, worst_turn = 0;
+    const int steps = 240;
+    for (int i = 0; i < steps; ++i) {
+        w.step(kDt);
+        const Joint& j = w.joints[static_cast<size_t>(rail)];
+        const Vec3 d = j.world_anchor_b(w.bodies) - j.world_anchor_a(w.bodies);
+        worst_off_axis = std::max(worst_off_axis, (d - axis * dot(d, axis)).length());
+        worst_turn = std::max(worst_turn, turn_between(start, w.bodies[0].q));
+    }
+    CHECK(worst_off_axis < 2e-3f);
+    CHECK(worst_turn < 3e-3f);
+    CHECK(w.bodies[0].w.length() < 1e-3f);
+    const Real t = static_cast<Real>(steps) * kDt, g_along = kG * std::cos(0.6f);
+    CHECK_NEAR(dot(w.bodies[0].vel, axis), along0 + g_along * t, 0.005 * (along0 + g_along * t));
+    CHECK_NEAR(w.joints[0].slide(w.bodies), along0 * t + 0.5 * g_along * t * t, 0.01 * (along0 * t + 0.5 * g_along * t * t));
+    CHECK(cross(w.bodies[0].vel, axis).length() < 1e-3f);  // its velocity is along the rail and nothing else
+}
+
+TEST(a_sliders_limits_are_the_ends_of_its_rail) {
+    World w;
+    w.allow_sleep = false;
+    const int block = w.add(Body::solid_box({0.2f, 0.2f, 0.2f}, 1, {0, 3, 0}));
+    Joint rail = Joint::slider(w.bodies, -1, block, {0, 3, 0}, {0, -1, 0});  // positive is downward
+    rail.enable_limit = true;
+    rail.lower = -0.3f;
+    rail.upper = 0.8f;
+    w.add_joint(rail);
+    Real deepest = 0;
+    for (int i = 0; i < 480; ++i) {
+        w.step(kDt);
+        deepest = std::max(deepest, w.joints[0].slide(w.bodies));
+    }
+    CHECK(deepest < 0.8f + 0.005f);
+    CHECK_NEAR(w.joints[0].slide(w.bodies), 0.8, 0.003);  // hanging on the bottom stop
+    CHECK(w.bodies[0].vel.length() < 0.01f);
+    CHECK(w.joints[0].impulses[7] > 0 && w.joints[0].impulses[6] == 0);  // held by the upper limit's row only
+    CHECK_NEAR(w.joints[0].impulses[7], w.bodies[0].mass * kG * kDt, 1e-3 * w.bodies[0].mass * kG * kDt);
+
+    // Thrown upward, it stops at the other end.
+    w.bodies[0].vel = {0, 6, 0};
+    Real highest = 1;
+    for (int i = 0; i < 60; ++i) {
+        w.step(kDt);
+        highest = std::min(highest, w.joints[0].slide(w.bodies));
+    }
+    CHECK(highest < -0.29f && highest > -0.3f - 0.005f);
+}
+
+TEST(a_sliders_motor_pushes_with_a_limited_force) {
+    // No gravity, from rest: at its force limit the motor gives v = F t / m.
+    {
+        World w;
+        w.gravity = {};
+        const int block = w.add(Body::solid_box({0.2f, 0.2f, 0.2f}, 1, {0, 0, 0}));
+        Joint rail = Joint::slider(w.bodies, -1, block, {0.1f, 0.1f, 0}, {1, 0, 0});
+        rail.enable_motor = true;
+        rail.motor_speed = 1000;  // never reached
+        rail.max_motor = 0.05f;
+        w.add_joint(rail);
+        run(w, 240);
+        CHECK_NEAR(w.bodies[0].vel.x, 0.05 / w.bodies[0].mass, 0.002 * 0.05 / w.bodies[0].mass);
+        // Strong enough, it simply holds the speed asked for, and reverses when told.
+        w.joints[0].max_motor = 100;
+        w.joints[0].motor_speed = 2;
+        run(w, 30);
+        CHECK_NEAR(w.bodies[0].vel.x, 2, 1e-3);
+        w.joints[0].motor_speed = -1;
+        run(w, 30);
+        CHECK_NEAR(w.bodies[0].vel.x, -1, 1e-3);
+    }
+    // A lift: it raises its load only if its force beats the weight.
+    auto climb = [](Real force_over_weight) {
+        World w;
+        const int cab = w.add(Body::solid_box({0.3f, 0.3f, 0.3f}, 1, {0, 2, 0}));
+        Joint rail = Joint::slider(w.bodies, -1, cab, {0, 2, 0}, {0, 1, 0});
+        rail.enable_motor = true;
+        rail.motor_speed = 1;
+        rail.max_motor = force_over_weight * w.bodies[0].mass * kG;
+        w.add_joint(rail);
+        run(w, 120);
+        return w.joints[0].slide(w.bodies);
+    };
+    CHECK(climb(1.1f) > 0.02f);
+    CHECK(climb(0.9f) < -0.02f);
+}
+
+TEST(a_sleeping_slider_wakes_when_its_motor_is_told_to_move) {
+    World w;
+    const int block = w.add(Body::solid_box({0.2f, 0.2f, 0.2f}, 1, {0, 3, 0}));
+    Joint rail = Joint::slider(w.bodies, -1, block, {0, 3, 0}, {0, 1, 0});
+    rail.enable_motor = true;  // a motor asked for no speed is a brake: it holds the block where it is
+    rail.max_motor = 1000;
+    w.add_joint(rail);
+    run(w, 240);
+    CHECK(w.stats().awake_bodies == 0);
+    CHECK_NEAR(w.joints[0].slide(w.bodies), 0, 1e-3);
+    w.joints[0].motor_speed = 0.5f;
+    run(w, 240);  // one second
+    CHECK(w.stats().awake_bodies == 1);
+    CHECK_NEAR(w.joints[0].slide(w.bodies), 0.5, 0.01);
+}
+
+TEST(a_slider_matches_the_2d_engines_prismatic_joint) {
+    // The same block on the same tilted rail with the same end stops, in both engines.
+    const Real mass = 1.5f, tilt = 0.4f, inertia = 0.2f;
+    World w3;
+    w3.allow_sleep = false;
+    w3.add(Body::dynamic(mass, Mat3::diagonal(inertia, inertia, inertia), {0, 4, 0}));
+    Joint rail3 = Joint::slider(w3.bodies, -1, 0, {0, 4, 0}, {std::cos(tilt), -std::sin(tilt), 0});
+    rail3.enable_limit = true;
+    rail3.lower = -0.5f;
+    rail3.upper = 1.2f;
+    w3.add_joint(rail3);
+
+    phys::World w2;
+    w2.allow_sleep = false;
+    phys::Body block(phys::Shape::make_polygon(phys::Polygon::box(0.2f, 0.2f)), {0, 4}, 0);
+    block.mass = mass;
+    block.inv_mass = 1 / mass;
+    block.inertia = inertia;
+    block.inv_inertia = 1 / inertia;
+    w2.add(block);
+    phys::Joint rail2 = phys::Joint::prismatic(w2.bodies, -1, 0, {0, 4}, {std::cos(tilt), -std::sin(tilt)});
+    rail2.enable_limit = true;
+    rail2.lower = -0.5f;
+    rail2.upper = 1.2f;
+    w2.add_joint(rail2);
+
+    for (int i = 0; i < 300; ++i) {
+        w3.step(kDt);
+        w2.step(kDt);
+        if (i == 100 || i == 299) {  // on the way down, and at rest on the stop
+            CHECK_NEAR(w3.bodies[0].pos.x, w2.bodies[0].pos.x, 1e-3);
+            CHECK_NEAR(w3.bodies[0].pos.y, w2.bodies[0].pos.y, 1e-3);
+            CHECK_NEAR(w3.bodies[0].vel.x, w2.bodies[0].vel.x, 2e-3);
+        }
+    }
+    CHECK_NEAR(w3.joints[0].slide(w3.bodies), 1.2, 0.003);
+}
+
+// ---- the cone on a ball joint ----------------------------------------------------------------------
+
+TEST(cone_row_matches_the_rate_the_tilt_changes) {
+    std::vector<Body> bodies = two_tumblers();
+    Joint shoulder = Joint::ball(bodies, 0, 1, {0.7f, 0.9f, 0.1f});
+    shoulder.limit_cone(bodies, {1, -2, 0.5f}, 0.3f);
+    CHECK_NEAR(shoulder.cone_tilt(bodies), 0, 1e-4);
+    // Bent 0.8 rad, well past the limit: the cone row is in force and reports how far past.
+    bodies[1].q = Quat::from_axis_angle({0.3f, 1, -0.2f}, 0.8f) * bodies[1].q;
+    CHECK(shoulder.cone_tilt(bodies) > 0.4f);
+    check_rows_against_finite_differences(bodies, shoulder, 4);
+    JointSolver solver;
+    solver.prepare(bodies, std::span<Joint>(&shoulder, 1), kDt, SolverSettings{});
+    CHECK_NEAR(solver.rows()[3].error, 0.3 - shoulder.cone_tilt(bodies), 1e-5);
+}
+
+TEST(a_cone_stops_a_ball_joint_bending_too_far_and_does_nothing_before_that) {
+    auto swing = [](bool cone, Real push, Real* widest, Vec3* end) {
+        World w;
+        w.allow_sleep = false;
+        const int arm = w.add(Body::solid_box({0.08f, 0.5f, 0.08f}, 1, {0, -0.5f, 0}));
+        Joint shoulder = Joint::ball(w.bodies, -1, arm, {0, 0, 0});
+        if (cone) shoulder.limit_cone(w.bodies, {0, -1, 0}, 0.5f);
+        w.add_joint(shoulder);
+        w.bodies[0].w = {0, 0, push};  // swung about the pivot, in the xy plane...
+        w.bodies[0].vel = cross(Vec3{0, 0, push}, Vec3{0, -0.5f, 0});
+        const Real e0 = total_energy(w), kinetic0 = w.bodies[0].kinetic_energy();
+        *widest = 0;
+        for (int i = 0; i < 240 * 3; ++i) {
+            w.step(kDt);
+            *widest = std::max(*widest, w.joints[0].cone_tilt(w.bodies));
+            // (The integrator's own wobble is under 1% of the swing's energy; a stop that kicked would show.)
+            CHECK(total_energy(w) <= e0 + 0.02f * kinetic0);
+        }
+        *end = w.bodies[0].pos;
+        return gap(w, 0);
+    };
+    Real widest_free, widest_coned, widest_gentle_free, widest_gentle_coned;
+    Vec3 end_free, end_coned, end_gentle_free, end_gentle_coned;
+    // A hard push: without the cone it swings out to well over a radian; with it, to the cone and no further.
+    swing(false, 5, &widest_free, &end_free);
+    const Real coned_gap = swing(true, 5, &widest_coned, &end_coned);
+    CHECK(widest_free > 1.0f);
+    CHECK(widest_coned > 0.49f && widest_coned < 0.5f + 0.01f);
+    CHECK(coned_gap < 2e-3f);
+    // A gentle one never reaches the cone, and then the cone changes nothing at all.
+    swing(false, 1, &widest_gentle_free, &end_gentle_free);
+    swing(true, 1, &widest_gentle_coned, &end_gentle_coned);
+    CHECK(widest_gentle_free < 0.45f && widest_gentle_free > 0.1f);
+    CHECK(distance(end_gentle_free, end_gentle_coned) < 1e-5f);
+}
+
+TEST(a_cone_leaves_twisting_about_the_axis_free) {
+    // Held against the cone by a sideways pull, and spinning about its own length: the cone must stop the
+    // lean and not touch the spin.
+    World w;
+    w.gravity = {3, -9.81f, 0};
+    w.allow_sleep = false;
+    Body arm = Body::solid_capsule(0.5f, 0.1f, 1, {0, -0.6f, 0});
+    arm.w = {0, 6, 0};
+    w.add(arm);
+    Joint shoulder = Joint::ball(w.bodies, -1, 0, {0, 0, 0});
+    shoulder.limit_cone(w.bodies, {0, -1, 0}, 0.1f);  // the pull would lean it 0.3 rad; the cone allows 0.1
+    w.add_joint(shoulder);
+    run(w, 240 * 3);
+    CHECK_NEAR(w.joints[0].cone_tilt(w.bodies), 0.1, 0.01);
+    const Vec3 along = rotate(w.bodies[0].q, {0, 1, 0});
+    CHECK_NEAR(std::fabs(dot(w.bodies[0].w, along)), 6, 0.1);
+}

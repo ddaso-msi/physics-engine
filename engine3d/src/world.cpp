@@ -63,7 +63,7 @@ void World::step(Real dt) {
     // A motor told to turn, with torque to do it, must be able to start a sleeping mechanism: commanding
     // it touches no velocity and no force.
     for (const Joint& j : joints) {
-        if (j.type == JointType::Hinge && j.enable_motor && j.max_motor > 0 && j.motor_speed != 0) {
+        if ((j.type == JointType::Hinge || j.type == JointType::Slider) && j.enable_motor && j.max_motor > 0 && j.motor_speed != 0) {
             if (j.a >= 0) bodies[static_cast<size_t>(j.a)].wake();
             if (j.b >= 0) bodies[static_cast<size_t>(j.b)].wake();
         }

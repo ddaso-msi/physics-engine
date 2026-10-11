@@ -25,6 +25,8 @@ Vec3 dir_to_world(const std::vector<Body>& bodies, int index, Vec3 local) {
     return index < 0 ? local : rotate(bodies[static_cast<size_t>(index)].q, local);
 }
 
+Quat orientation_of(const std::vector<Body>& bodies, int index) { return index < 0 ? Quat{} : bodies[static_cast<size_t>(index)].q; }
+
 // How far `ref_b` has turned from `ref_a` about unit `axis` (both perpendicular to it), in (-pi, pi].
 Real angle_about(Vec3 axis, Vec3 ref_a, Vec3 ref_b) { return std::atan2(dot(cross(ref_a, ref_b), axis), dot(ref_a, ref_b)); }
 
@@ -67,6 +69,28 @@ Joint Joint::hinge(const std::vector<Body>& bodies, int a, int b, Vec3 world_anc
     return j;
 }
 
+Joint Joint::weld(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor) {
+    Joint j = ball(bodies, a, b, world_anchor);
+    j.type = JointType::Weld;
+    j.relative_orientation = conjugate(orientation_of(bodies, a)) * orientation_of(bodies, b);
+    return j;
+}
+
+Joint Joint::slider(const std::vector<Body>& bodies, int a, int b, Vec3 world_anchor, Vec3 world_axis) {
+    Joint j = hinge(bodies, a, b, world_anchor, world_axis);  // the same anchors, axis and reference directions
+    j.type = JointType::Slider;
+    j.relative_orientation = conjugate(orientation_of(bodies, a)) * orientation_of(bodies, b);
+    return j;
+}
+
+void Joint::limit_cone(const std::vector<Body>& bodies, Vec3 world_axis, Real max_angle) {
+    const Vec3 axis = world_axis.normalized();
+    local_axis_a = dir_to_local(bodies, a, axis);
+    local_axis_b = dir_to_local(bodies, b, axis);
+    enable_cone = true;
+    cone_angle = max_angle;
+}
+
 Vec3 Joint::world_anchor_a(const std::vector<Body>& bodies) const {
     return a < 0 ? local_anchor_a : apply(bodies[static_cast<size_t>(a)].transform(), local_anchor_a);
 }
@@ -76,6 +100,12 @@ Vec3 Joint::world_anchor_b(const std::vector<Body>& bodies) const {
 Vec3 Joint::world_axis(const std::vector<Body>& bodies) const { return dir_to_world(bodies, a, local_axis_a); }
 Real Joint::hinge_angle(const std::vector<Body>& bodies) const {
     return angle_about(world_axis(bodies), dir_to_world(bodies, a, local_ref_a), dir_to_world(bodies, b, local_ref_b));
+}
+
+Real Joint::slide(const std::vector<Body>& bodies) const { return dot(world_anchor_b(bodies) - world_anchor_a(bodies), world_axis(bodies)); }
+Real Joint::cone_tilt(const std::vector<Body>& bodies) const {
+    const Vec3 a1 = world_axis(bodies), b1 = dir_to_world(bodies, b, local_axis_b);
+    return std::atan2(cross(a1, b1).length(), dot(a1, b1));
 }
 
 // ---- rows ----------------------------------------------------------------------------------------
@@ -188,7 +218,21 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
                 const Vec3 C = pb - pa;
                 const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
                 for (int i = 0; i < 3; ++i) add_point_row(i, axes[i], dot(C, axes[i]));
-                if (j.type == JointType::Ball) break;
+                if (j.type == JointType::Ball) {
+                    if (!j.enable_cone) break;
+                    // The cone: the angle between the two copies of the axis may not exceed cone_angle. That
+                    // angle grows when b turns, relative to a, about the direction a1 x b1; so this is a
+                    // one-sided row about that direction, like a hinge's limit. (With the two copies in
+                    // line the direction is undefined, and the limit is nowhere near.)
+                    const Vec3 a1 = rotate(A->q, j.local_axis_a), b1 = rotate(B->q, j.local_axis_b);
+                    const Vec3 across = cross(a1, b1);
+                    const Real sine = across.length();
+                    if (sine < static_cast<Real>(1e-6)) break;
+                    const Vec3 u = across / sine;
+                    const Real room = j.cone_angle - std::atan2(sine, dot(a1, b1));
+                    add(3, {}, u, {}, -u, room > 0 ? room / dt : Real(0), 0, kInf, std::min(room, Real(0)));
+                    break;
+                }
 
                 // The axis. With a1 and b1 the axis as each body carries it, a1 x b1 is (for a small
                 // misalignment) the rotation that has pulled them apart, and it is perpendicular to a1.
@@ -210,6 +254,49 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
                     const Real c_low = angle - j.lower, c_up = j.upper - angle;
                     add(6, {}, -a1, {}, a1, c_low > 0 ? c_low / dt : Real(0), 0, kInf, std::min(c_low, Real(0)));
                     add(7, {}, a1, {}, -a1, c_up > 0 ? c_up / dt : Real(0), 0, kInf, std::min(c_up, Real(0)));
+                }
+                break;
+            }
+
+            case JointType::Weld:
+            case JointType::Slider: {
+                // No relative turning. Seen from a, b's orientation should be what it was when the joint
+                // was made; whatever rotation takes that to what it is now is the error, a small turn
+                // about some axis, and each world axis gets a row for its share of it.
+                const Quat seen_from_a = conjugate(A->q) * B->q;
+                Quat off = seen_from_a * conjugate(j.relative_orientation);
+                if (off.w < 0) off = off * Real(-1);  // the same rotation, written the short way round
+                const Vec3 v = off.vector_part();
+                const Real sine = v.length();
+                const Vec3 turned = sine > static_cast<Real>(1e-9) ? rotate(A->q, v * (2 * std::atan2(sine, off.w) / sine)) : Vec3{};
+                const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+                const int first_angular = j.type == JointType::Weld ? 3 : 2;
+                for (int i = 0; i < 3; ++i) add(first_angular + i, {}, -axes[i], {}, axes[i], 0, -kInf, kInf, dot(turned, axes[i]));
+
+                if (j.type == JointType::Weld) {
+                    const Vec3 C = pb - pa;
+                    for (int i = 0; i < 3; ++i) add_point_row(i, axes[i], dot(C, axes[i]));
+                    break;
+                }
+
+                // The slider. Its axis and the two directions across it ride with body a. A row along
+                // direction e of that frame measures C = e . (pb - pa), and since e itself turns with a,
+                //     dC/dt = e . (v_b + w_b x rb - v_a - w_a x ra) + (w_a x e) . d
+                // which puts ra + d, not ra, in a's angular part.
+                const Vec3 d = pb - pa;
+                const Vec3 a1 = rotate(A->q, j.local_axis_a), t1 = rotate(A->q, j.local_ref_a), t2 = cross(a1, t1);
+                auto add_rail_row = [&](int slot, Vec3 e, Real bias, Real lower, Real upper, Real error) {
+                    add(slot, -e, -cross(ra + d, e), e, cross(rb, e), bias, lower, upper, error);
+                };
+                // Across the axis: stay on the rail.
+                add_rail_row(0, t1, 0, -kInf, kInf, dot(d, t1));
+                add_rail_row(1, t2, 0, -kInf, kInf, dot(d, t2));
+                // Along it: a motor (a speed, with a force limit) and the ends of the rail.
+                if (j.enable_motor) add_rail_row(5, a1, -j.motor_speed, -j.max_motor * dt, j.max_motor * dt, 0);
+                if (j.enable_limit) {
+                    const Real slid = dot(d, a1), c_low = slid - j.lower, c_up = j.upper - slid;
+                    add_rail_row(6, a1, c_low > 0 ? c_low / dt : Real(0), 0, kInf, std::min(c_low, Real(0)));
+                    add_rail_row(7, -a1, c_up > 0 ? c_up / dt : Real(0), 0, kInf, std::min(c_up, Real(0)));
                 }
                 break;
             }
