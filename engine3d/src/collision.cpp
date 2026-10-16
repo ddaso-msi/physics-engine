@@ -579,8 +579,8 @@ int face_patch(const Feature& ref, Real ref_radius, const Feature& inc, Real inc
 
 }  // namespace
 
-bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
-    ClosestResult hit = closest(a, b, /*with_points=*/false);
+bool collide_convex(const Convex& a, const Convex& b, Manifold& out, GjkCache* cache) {
+    ClosestResult hit = closest(a, b, /*with_points=*/false, cache);
     if (hit.distance > 0) return false;
 
     // GJK and EPA give the direction and depth of the contact. With one point of it, that is the whole
@@ -649,14 +649,14 @@ bool collide_convex(const Convex& a, const Convex& b, Manifold& out) {
     return true;
 }
 
-bool collide(const Body& a, const Body& b, Manifold& out) {
+bool collide(const Body& a, const Body& b, Manifold& out, GjkCache* cache) {
     using Type = Shape::Type;
     Manifold m;
     bool hit;
     const auto general = [](Type t) { return t == Type::Capsule || t == Type::Hull; };
     if (general(a.shape.type) || general(b.shape.type)) {
         // No routine was written for capsules or hulls: they go through GJK and EPA.
-        hit = collide_convex(Convex::of(a), Convex::of(b), m);
+        hit = collide_convex(Convex::of(a), Convex::of(b), m, cache);
     } else if (a.shape.type == Type::Sphere && b.shape.type == Type::Sphere) {
         hit = collide_spheres(a, b, m);
     } else if (a.shape.type == Type::Box && b.shape.type == Type::Sphere) {

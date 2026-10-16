@@ -38,13 +38,14 @@ struct Manifold {
 
 // True and fills `out` when the bodies' shapes overlap; `out` is untouched otherwise. Handles every
 // pairing of sphere, box, capsule and hull (capsules and hulls by way of collide_convex below).
-bool collide(const Body& a, const Body& b, Manifold& out);
+bool collide(const Body& a, const Body& b, Manifold& out, GjkCache* cache = nullptr);
 
 // The same contract, for any two convex shapes, built on GJK and EPA (gjk.hpp) instead of on knowledge of
 // the particular shapes. GJK/EPA give the normal, the depth and ONE point; this adds the rest of the contact
 // patch when a face of a box or of a built hull is involved (up to four points) or two capsules lie side by
 // side (two).
-bool collide_convex(const Convex& a, const Convex& b, Manifold& out);
+// `cache`, if given, carries GJK's work over from the last call for the same pair (see GjkCache).
+bool collide_convex(const Convex& a, const Convex& b, Manifold& out, GjkCache* cache = nullptr);
 
 // Is `world_point` inside the body's shape? (For picking, and for testing the narrow phase.)
 bool contains(const Body& body, Vec3 world_point);

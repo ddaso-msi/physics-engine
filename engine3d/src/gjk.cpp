@@ -76,6 +76,7 @@ namespace {
 // so the answer can be turned back into points on the shapes.
 struct Vertex {
     Vec3 w, a, b;  // w = a - b
+    Vec3 d;        // the direction it was sampled in, kept for GjkCache
 };
 
 // Everything is done relative to `origin` (a's position), so the numbers stay small wherever in the
@@ -89,6 +90,7 @@ struct Pair {
         v.a = a.core_support(d) - origin;
         v.b = b.core_support(-d) - origin;
         v.w = v.a - v.b;
+        v.d = d;
         return v;
     }
 };
@@ -125,35 +127,46 @@ void closest_on_segment(Vec3 a, Vec3 b, Real out[2]) {
 // The plane around a triangle splits into seven regions (three corners, three edges, the inside); each test below asks "is the origin
 // in this one?" using only dot products. (Ericson, Real-Time Collision Detection, 5.1.5.)
 void closest_on_triangle(Vec3 a, Vec3 b, Vec3 c, Real out[3]) {
-    const Vec3 ab = b - a, ac = c - a;
-    const Real d1 = dot(ab, -a), d2 = dot(ac, -a);
+    // In double precision. The region tests multiply dot products together, so their size goes as the
+    // FOURTH power of the triangle's: for the samples of a 60 m floor against a ball 20 cm above it that
+    // is 10^7, and single precision, good to a part in 10^7, could no longer tell which side of an edge the
+    // origin was on. It picked the wrong one, and the floor's normal came out tilted by most of a degree.
+    struct D {
+        double x, y, z;
+    };
+    auto to_d = [](Vec3 v) { return D{v.x, v.y, v.z}; };
+    auto sub = [](D p, D q) { return D{p.x - q.x, p.y - q.y, p.z - q.z}; };
+    auto dot_d = [](D p, D q) { return p.x * q.x + p.y * q.y + p.z * q.z; };
+    const D A = to_d(a), B = to_d(b), C = to_d(c), ab = sub(B, A), ac = sub(C, A);
+    const D na{-A.x, -A.y, -A.z}, nb{-B.x, -B.y, -B.z}, nc{-C.x, -C.y, -C.z};
+    const double d1 = dot_d(ab, na), d2 = dot_d(ac, na);
     out[0] = out[1] = out[2] = 0;
     if (d1 <= 0 && d2 <= 0) { out[0] = 1; return; }  // corner a
-    const Real d3 = dot(ab, -b), d4 = dot(ac, -b);
+    const double d3 = dot_d(ab, nb), d4 = dot_d(ac, nb);
     if (d3 >= 0 && d4 <= d3) { out[1] = 1; return; }  // corner b
-    const Real vc = d1 * d4 - d3 * d2;
+    const double vc = d1 * d4 - d3 * d2;
     if (vc <= 0 && d1 >= 0 && d3 <= 0) {  // edge ab
-        const Real t = d1 / (d1 - d3);
-        out[0] = 1 - t, out[1] = t;
+        const double t = d1 / (d1 - d3);
+        out[0] = static_cast<Real>(1 - t), out[1] = static_cast<Real>(t);
         return;
     }
-    const Real d5 = dot(ab, -c), d6 = dot(ac, -c);
+    const double d5 = dot_d(ab, nc), d6 = dot_d(ac, nc);
     if (d6 >= 0 && d5 <= d6) { out[2] = 1; return; }  // corner c
-    const Real vb = d5 * d2 - d1 * d6;
+    const double vb = d5 * d2 - d1 * d6;
     if (vb <= 0 && d2 >= 0 && d6 <= 0) {  // edge ac
-        const Real t = d2 / (d2 - d6);
-        out[0] = 1 - t, out[2] = t;
+        const double t = d2 / (d2 - d6);
+        out[0] = static_cast<Real>(1 - t), out[2] = static_cast<Real>(t);
         return;
     }
-    const Real va = d3 * d6 - d5 * d4;
+    const double va = d3 * d6 - d5 * d4;
     if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {  // edge bc
-        const Real t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        out[1] = 1 - t, out[2] = t;
+        const double t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        out[1] = static_cast<Real>(1 - t), out[2] = static_cast<Real>(t);
         return;
     }
-    const Real sum = va + vb + vc;
-    out[1] = vb / sum;
-    out[2] = vc / sum;
+    const double sum = va + vb + vc;
+    out[1] = static_cast<Real>(vb / sum);
+    out[2] = static_cast<Real>(vc / sum);
     out[0] = 1 - out[1] - out[2];
 }
 
@@ -228,14 +241,32 @@ constexpr int kMaxGjkIterations = 48;
 
 // Runs GJK on the cores. Returns true if they overlap (the simplex then holds or encloses the origin);
 // otherwise the simplex and its weights give the closest points.
-bool gjk(const Pair& pair, Simplex& s, int& iterations, bool& converged) {
-    Vec3 start = pair.b.pos - pair.a.pos;
-    if (start.length_sq() < static_cast<Real>(1e-12)) start = {1, 0, 0};
-    s.v[0] = pair.sample(start);
-    s.weight[0] = 1;
-    s.n = 1;
-    Vec3 v = s.v[0].w;
+bool gjk(const Pair& pair, Simplex& s, int& iterations, bool& converged, const GjkCache* cache = nullptr) {
     converged = true;
+    iterations = 1;
+    Vec3 v;
+    if (cache && cache->count > 0) {
+        // Start from last step's simplex: sample A - B again in the directions that found its corners.
+        // The shapes have barely moved, so these are nearly the corners GJK would end at, and for a pair
+        // that was touching they usually still enclose the origin, which is the whole of GJK's job.
+        s.n = 0;
+        for (int k = 0; k < cache->count; ++k) {
+            const Vertex x = pair.sample(cache->directions[k]);
+            bool repeat = false;
+            for (int i = 0; i < s.n; ++i) repeat = repeat || (s.v[i].w - x.w).length_sq() == 0;
+            if (!repeat) s.v[s.n++] = x;
+        }
+        if (solve(s)) return true;
+        v = s.closest();
+    } else {
+        // Otherwise look first toward b from a.
+        Vec3 start = pair.b.pos - pair.a.pos;
+        if (start.length_sq() < static_cast<Real>(1e-12)) start = {1, 0, 0};
+        s.v[0] = pair.sample(start);
+        s.weight[0] = 1;
+        s.n = 1;
+        v = s.v[0].w;
+    }
 
     for (iterations = 1; iterations <= kMaxGjkIterations; ++iterations) {
         const Real v_sq = v.length_sq();
@@ -481,11 +512,17 @@ void find_deepest_points(const Convex& a, const Convex& b, ClosestResult& out) {
     place_points(a, b, s, shift, out);
 }
 
-ClosestResult closest(const Convex& a, const Convex& b, bool with_points) {
+ClosestResult closest(const Convex& a, const Convex& b, bool with_points, GjkCache* cache) {
     const Pair pair{a, b, a.pos};
     ClosestResult out;
     Simplex s;
-    if (gjk(pair, s, out.gjk_iterations, out.converged)) {
+    const bool cores_overlap = gjk(pair, s, out.gjk_iterations, out.converged, cache);
+    if (cache) {
+        cache->count = s.n;
+        cache->iterations = out.gjk_iterations;
+        for (int i = 0; i < s.n; ++i) cache->directions[i] = s.v[i].d;
+    }
+    if (cores_overlap) {
         // How big the shapes are, for the tolerance used if the deepest points are asked for: the farthest
         // of the points of either that GJK sampled, measured from a's position. (Not the samples of A - B
         // themselves, which can all sit at the origin when the cores only touch.)

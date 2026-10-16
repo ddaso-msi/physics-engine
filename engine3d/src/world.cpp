@@ -96,18 +96,36 @@ void World::step(Real dt) {
     lap(stats_.ms_broadphase);
 
     // 2. Narrow phase. A pair where neither body is being simulated cannot change, so it is not recomputed...
+    //    Each pair's GJK starts from where it ended last step, if the pair was a candidate then too. Both
+    //    lists are sorted by pair, so finding last step's entry is a walk along it, not a search.
+    gjk_cache_next_.clear();
+    size_t cached = 0;
+    stats_.gjk_pairs = 0;
+    stats_.gjk_iterations = 0;
     for (const IndexPair& pair : candidates) {
         const Body& a = bodies[static_cast<size_t>(pair.a)];
         const Body& b = bodies[static_cast<size_t>(pair.b)];
         if (!a.is_active() && !b.is_active()) continue;
-        if (!no_collide_.empty() && no_collide_.count(pair_key(pair.a, pair.b))) continue;
+        const std::uint64_t key = pair_key(pair.a, pair.b);
+        if (!no_collide_.empty() && no_collide_.count(key)) continue;
+        while (cached < gjk_cache_.size() && gjk_cache_[cached].key < key) ++cached;
+        GjkCache gjk;
+        if (cached < gjk_cache_.size() && gjk_cache_[cached].key == key) gjk = gjk_cache_[cached].gjk;
+        gjk.iterations = 0;
         ContactPair contact;
-        if (collide_pair(a, b, contact.manifold)) {
+        const bool touching = collide_pair(a, b, contact.manifold, &gjk);
+        if (gjk.iterations > 0) {  // (zero: this pair never reached GJK, the per-shape code handled it)
+            ++stats_.gjk_pairs;
+            stats_.gjk_iterations += static_cast<std::uint64_t>(gjk.iterations);
+        }
+        gjk_cache_next_.push_back({key, gjk});
+        if (touching) {
             contact.a = pair.a;
             contact.b = pair.b;
             contacts_.push_back(contact);
         }
     }
+    std::swap(gjk_cache_, gjk_cache_next_);
     // ...but a contact between two sleeping bodies (or a sleeper and the ground) is remembered, with its
     // impulses, so that waking the pile warm starts it instead of letting it settle from scratch.
     for (ContactPair& c : previous) {

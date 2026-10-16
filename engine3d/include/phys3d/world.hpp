@@ -29,7 +29,9 @@ struct StepStats {
     std::size_t awake_bodies = 0;        // dynamic bodies being simulated (not asleep)
     std::size_t islands = 0;             // groups of dynamic bodies connected by contacts or joints
     std::size_t ccd_swept = 0;           // bodies moving fast enough to be swept by the continuous pass
-    std::size_t ccd_hits = 0;            // of those, how many it stopped at a static body
+    std::size_t ccd_hits = 0;
+    std::size_t gjk_pairs = 0;           // pairs that went through GJK in the narrow phase...
+    std::uint64_t gjk_iterations = 0;    // ...and the GJK iterations they took between them            // of those, how many it stopped at a static body
     // Milliseconds the last step spent in each phase. (The solver's includes applying gravity; movement's
     // includes the joint position pass; the narrow phase's includes matching contacts to last step's.)
     double ms_broadphase = 0, ms_narrowphase = 0, ms_islands = 0, ms_solver = 0, ms_movement = 0, ms_sweep = 0, ms_sleep = 0;
@@ -79,6 +81,7 @@ public:
     void truncate(size_t count) {
         bodies.resize(count);
         contacts_.clear();
+        gjk_cache_.clear();
         const int limit = static_cast<int>(count);
         std::erase_if(joints, [&](const Joint& j) { return j.a >= limit || j.b >= limit; });
     }
@@ -104,8 +107,8 @@ public:
 private:
     void continuous_collision();
     // The narrow phase, by whichever method `narrowphase` selects.
-    bool collide_pair(const Body& a, const Body& b, Manifold& out) const {
-        return narrowphase == NarrowPhase::Convex ? collide_convex(Convex::of(a), Convex::of(b), out) : collide(a, b, out);
+    bool collide_pair(const Body& a, const Body& b, Manifold& out, GjkCache* cache = nullptr) const {
+        return narrowphase == NarrowPhase::Convex ? collide_convex(Convex::of(a), Convex::of(b), out, cache) : collide(a, b, out, cache);
     }
 
     std::vector<ContactPair> contacts_;
@@ -117,7 +120,13 @@ private:
     TreeBroadphase tree_;
     std::vector<AABB> boxes_;  // scratch, reused every step
     std::vector<std::uint8_t> immovable_;
-    std::unordered_set<std::uint64_t> no_collide_;  // body pairs joined by a joint that forbids their collision
+    std::unordered_set<std::uint64_t> no_collide_;
+    // What GJK ended with for each candidate pair last step, in the broad phase's order (sorted by pair).
+    struct CachedPair {
+        std::uint64_t key;
+        GjkCache gjk;
+    };
+    std::vector<CachedPair> gjk_cache_, gjk_cache_next_;  // body pairs joined by a joint that forbids their collision
 };
 
 }  // namespace phys3d

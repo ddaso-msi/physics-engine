@@ -552,3 +552,91 @@ TEST(gjk_and_epa_finish_in_a_handful_of_steps) {
     CHECK(worst_epa <= 60);
     CHECK(total_gjk < 8L * trials);  // a handful on average
 }
+
+TEST(a_ball_resting_on_a_huge_floor_gets_a_level_normal) {
+    // Found when warm-started and fresh answers disagreed. The samples of A - B for a 60 m floor and a small
+    // shape are 30 m from the origin while the gap is centimetres; the triangle routine's region tests
+    // multiply dot products together and, in single precision, picked the wrong region. The normal came out
+    // tilted by most of a degree, and the depth along it was wrong by a long way.
+    const Convex floor = Convex::box({30, 0.5f, 30}, {0, -0.5f, 0});
+    Lcg rng;
+    for (int trial = 0; trial < 500; ++trial) {
+        const Vec3 at{rng.range(-3, 3), 0, rng.range(-3, 3)};
+        const Convex shape = trial % 2 ? Convex::capsule(rng.range(0.1f, 0.4f), rng.range(0.1f, 0.3f), at, rng.rotation())
+                                       : Convex::box({rng.range(0.1f, 0.4f), rng.range(0.1f, 0.4f), rng.range(0.1f, 0.4f)}, at, rng.rotation());
+        Convex placed = shape;
+        placed.pos.y += -dot(shape.support({0, -1, 0}), {0, 1, 0}) + rng.range(0.01f, 0.3f);  // its lowest point 1 to 30 cm up
+        const ClosestResult r = closest(floor, placed);
+        CHECK(cross(r.normal, Vec3{0, 1, 0}).length() < 1e-3f);
+        CHECK_NEAR(r.distance, dot(placed.support({0, -1, 0}), {0, 1, 0}), 1e-3);
+    }
+}
+
+TEST(shapes_on_floors_of_30_and_300_metres_get_level_normals) {
+    // The configurations a floor stress found with the triangle routine in single precision: tilts of up
+    // to a third of a radian. They are regenerated here exactly as the stress made them (the same random
+    // sequence: floors of 5, 30 and 300 m, a hundred thousand shapes each, in that order).
+    struct Case {
+        Real floor;
+        int trial, order;
+    };
+    const Case cases[] = {{30, 57642, 1}, {300, 23511, 1}, {300, 42747, 1}, {300, 43137, 0}, {300, 43592, 0}, {300, 55052, 1}, {300, 63229, 0}, {300, 66628, 0}};
+    Lcg rng;
+    for (const Real floor_half : {5.0f, 30.0f, 300.0f})
+        for (int trial = 0; trial < 100000; ++trial) {
+            RandomShape s;
+            make_shape(s, trial % 5, rng, {rng.range(-3, 3), 0, rng.range(-3, 3)}, rng.range(0.1f, 0.5f));
+            const Real low = dot(s.convex.support({0, -1, 0}), {0, 1, 0});
+            s.convex.pos.y += -low + rng.range(-0.05f, 0.3f);
+            for (const Case& c : cases) {
+                if (c.floor != floor_half || c.trial != trial) continue;
+                const Convex floor = Convex::box({floor_half, 0.5f, floor_half}, {0, -0.5f, 0});
+                const ClosestResult r = c.order ? closest(s.convex, floor) : closest(floor, s.convex);
+                CHECK(cross(r.normal, Vec3{0, 1, 0}).length() < 1e-3f);
+            }
+        }
+}
+
+// ---- starting from last step's answer -------------------------------------------------------------
+
+TEST(a_warm_cache_gives_the_same_answer_in_fewer_steps) {
+    Lcg rng;
+    long cold_iterations = 0, warm_iterations = 0;
+    for (int trial = 0; trial < 3000; ++trial) {
+        RandomShape a, b;
+        make_shape(a, trial % 5, rng, rng.in_box(0.5f), 1);
+        make_shape(b, (trial / 5) % 5, rng, rng.in_box(trial % 2 ? 2.2f : 0.8f), 1);
+        // Last step the pair stood a centimetre and a degree or two from where it stands now.
+        GjkCache cache;
+        Convex before = b.convex;
+        before.pos += rng.in_box(0.01f);
+        before.q = Quat::from_axis_angle(rng.direction(), rng.range(0, 0.04f)) * before.q;
+        closest(a.convex, before, false, &cache);
+        CHECK(cache.count >= 1 && cache.count <= 4);
+
+        const ClosestResult cold = closest(a.convex, b.convex), warm = closest(a.convex, b.convex, true, &cache);
+        CHECK_NEAR(warm.distance, cold.distance, 1e-4);
+        CHECK(dot(warm.normal, cold.normal) > 0.999f || std::fabs(cold.distance) < 1e-3f);
+        cold_iterations += cold.gjk_iterations;
+        warm_iterations += warm.gjk_iterations;
+    }
+    // Measured: a little over half the work, for pairs that each moved a centimetre and a couple of degrees.
+    CHECK(warm_iterations * 10 < cold_iterations * 7);
+}
+
+TEST(a_cache_from_somewhere_else_entirely_does_no_harm) {
+    // The cache is only a place to start. A stale one, from a different pair altogether or from before the
+    // shapes moved a long way, must still lead to the right answer.
+    Lcg rng;
+    GjkCache stale;
+    for (int trial = 0; trial < 3000; ++trial) {
+        RandomShape a, b;
+        make_shape(a, trial % 5, rng, rng.in_box(0.5f), 1);
+        make_shape(b, (trial / 5) % 5, rng, rng.in_box(trial % 2 ? 2.2f : 0.8f), 1);
+        GjkCache used = stale;
+        const ClosestResult cold = closest(a.convex, b.convex), warm = closest(a.convex, b.convex, true, &used);
+        CHECK_NEAR(warm.distance, cold.distance, 1e-4);
+        CHECK(warm.converged);
+        stale = used;  // the next pair starts from this pair's ending
+    }
+}

@@ -88,7 +88,17 @@ struct ClosestResult {
 
 // `with_points` false skips the search for point_a and point_b when the cores overlap (about half the work
 // in that case), for a caller that may not need them; find_deepest_points fills them in later if it does.
-ClosestResult closest(const Convex& a, const Convex& b, bool with_points = true);
+// What GJK ended with for one pair of shapes, kept so that the next call for the same pair can start there:
+// the directions in which it sampled the corners of its final simplex. A pair that barely moves between
+// steps then needs one round of sampling instead of four or five. An empty cache means "start afresh".
+struct GjkCache {
+    Vec3 directions[4];
+    int count = 0;
+    int iterations = 0;  // how many GJK took last time (for the world's statistics)
+};
+
+// `cache`, if given, is read to start the search and written with how it ended.
+ClosestResult closest(const Convex& a, const Convex& b, bool with_points = true, GjkCache* cache = nullptr);
 void find_deepest_points(const Convex& a, const Convex& b, ClosestResult& result);
 
 // The two small geometric routines GJK is built from, exposed so they can be tested on their own.

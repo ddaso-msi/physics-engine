@@ -401,6 +401,48 @@ TEST(the_world_uses_whichever_narrow_phase_it_is_told_to) {
     CHECK(found == 20);
 }
 
+TEST(the_worlds_warm_started_contacts_are_the_contacts) {
+    // The world starts each pair's GJK from last step's simplex. Whatever it found must be what a fresh
+    // call finds for the same poses.
+    World w = convex_world_with_floor();
+    w.allow_sleep = false;  // (so that every pair is still being worked on at the end)
+    Lcg rng;
+    for (int i = 0; i < 60; ++i) {
+        const Vec3 at{rng.range(-2, 2), 0.6f + static_cast<Real>(i) * 0.4f, rng.range(-2, 2)};
+        if (i % 3 == 0) {
+            Body ball = Body::solid_sphere(rng.range(0.2f, 0.4f), 1, at);
+            ball.restitution = 0;
+            w.add(ball);
+        } else if (i % 3 == 1) {
+            w.add(crate(at, {rng.range(0.2f, 0.4f), rng.range(0.2f, 0.4f), rng.range(0.2f, 0.4f)}, rng.rotation()));
+        } else {
+            Body capsule = Body::solid_capsule(rng.range(0.2f, 0.4f), rng.range(0.15f, 0.25f), 1, at, rng.rotation());
+            capsule.restitution = 0;
+            w.add(capsule);
+        }
+    }
+    int compared = 0;
+    for (int step = 0; step < 600; ++step) {
+        // The world computes its contacts at the start of a step, from the poses it has then: keep a copy.
+        const std::vector<Body> poses = w.bodies;
+        w.step(kDt);
+        if (step % 50 != 49) continue;
+        for (const ContactPair& c : w.contacts()) {
+            if (c.dormant) continue;
+            Manifold fresh;
+            CHECK(collide_convex(Convex::of(poses[static_cast<size_t>(c.a)]), Convex::of(poses[static_cast<size_t>(c.b)]), fresh));
+            CHECK_NEAR(fresh.depth, c.manifold.depth, 1e-4);
+            CHECK(dot(fresh.normal, c.manifold.normal) > 0.9999f);
+            ++compared;
+        }
+    }
+    CHECK(compared > 300);
+    // And the world did start from where it left off: a settled pile needs about one GJK iteration a pair.
+    // (From scratch it is four or five.)
+    CHECK(w.stats().gjk_pairs > 60);  // (measured: 100, one iteration each; started afresh they took 328)
+    CHECK(static_cast<double>(w.stats().gjk_iterations) < 2.0 * static_cast<double>(w.stats().gjk_pairs));
+}
+
 TEST(a_tower_stands_on_the_convex_path_exactly_as_on_the_box_code) {
     auto top_of_tower = [](NarrowPhase path, size_t* awake) {
         World w = convex_world_with_floor();

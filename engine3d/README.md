@@ -801,6 +801,57 @@ the other way would look a full turn out of place. No test wrote one that way; o
 Not done: a twist limit for the ball joint (the cone leaves twist free), a mouse joint, a fixed-distance
 "rope" with slack. No demo scene uses the new joints.
 
+## Step 17: starting GJK from last step's answer
+
+Two bodies resting on each other are in almost the same place every step, and GJK was finding the same
+simplex from scratch every time. `GjkCache` keeps, for one pair, the directions in which GJK sampled the
+corners of its final simplex; the next call samples A - B in those directions again. For a pair that was
+touching those four points usually still enclose the origin, which is all GJK has to establish before EPA
+takes over; for a pair that was apart they are already next to the closest point. The world keeps one cache
+per candidate pair. Its pair list and last step's are both sorted, so finding last step's entry is a walk
+along it, not a lookup.
+
+Measured before building it, on settled piles of 1000 crates and 1000 hulls:
+- starting only from last step's NORMAL saved 3 to 9% per pair, too little to be worth carrying around;
+- starting from last step's SIMPLEX saved a third (0.36 to 0.24 microseconds per pair for crates, 0.61 to
+  0.41 for hulls), with every answer the same.
+
+In the world, narrow phase per step at 1000 bodies: hulls 4.3 to 3.2 ms, mixed 1.26 to 1.06, crates on the
+GJK path 1.74 to 1.35. At 2000 hulls, 8.7 to 6.6. A cache is only a place to start: one from a different pair
+altogether still gives the right answer, and a million random pairs each started from a cache warmed on a
+slightly different pose pass the step 9 audit without a single failure.
+
+**A bug this found, older than the cache.** A test that compares the world's warm-started contacts with
+fresh calls disagreed on one pair: a capsule resting on the 60 m floor. The fresh answer was the wrong one,
+its normal tilted by 0.8 degrees and its depth inconsistent with that normal by 0.87 m. GJK's closest point on
+a triangle (step 9) decides which region of the triangle the origin is in by multiplying dot products, whose
+size goes as the fourth power of the triangle's. For samples of a 60 m floor against something 20 cm above
+it that is 10^7, all single precision can resolve, and it picked the wrong region. That routine now works in
+double precision, and 500 boxes and capsules resting on the 60 m floor must get a level normal.
+
+**A limit it also showed, not fixed here.** GJK's tolerances are relative to the size of the numbers it works
+with, and against a big floor those are the floor's corners. A stress of small shapes on floors of three sizes:
+
+| floor half-width | distances wrong by over 1 mm | worst |
+|---|---|---|
+| 5 m | 0 of 200000 | under 1 mm |
+| 30 m | 1167 | 4.5 mm |
+| 300 m | 26044 | 11 cm |
+
+Normals stay level; it is distances near contact that suffer (within a ten-thousandth of 42 m, about 4 mm,
+everything reads as touching). The next step is to do GJK and EPA's own arithmetic in double precision, as
+the hull builder does.
+
+`StepStats` now also counts the pairs that ran GJK in a step and their iterations: on a settled pile each
+takes one (started afresh, the same pairs took 3.3 each).
+
+Tests (5, 263 in total): a warm cache gives the same answers in under 70% of the iterations; a cache from
+anywhere else does no harm; the world's warm-started contacts equal fresh calls, and settled pairs average
+under two iterations; the level floor, both for the 500 resting shapes and for the eight floor-stress cases
+that went wrong. Deliberate breakages: the world not reading the cache, not writing it, or forgetting it each
+step, and the triangle routine back in single precision, are all caught. The world reading the wrong pair's
+entry is not: it costs time, never correctness, which the cache-from-anywhere test is there to show.
+
 ## Planned next
 
-Starting GJK from last step's answer for each pair, the largest cost left in a hull scene.
+GJK and EPA in double precision.
