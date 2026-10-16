@@ -982,6 +982,50 @@ more than 10; with this step its pyramid is asleep by then, so it counts stored 
 for it. Not caught: writing back to static bodies, and everything in one colour; both cost time and never
 change a result.
 
+## Step 20: when to lay the tree out afresh
+
+Step 15's rule was: rebuild the broad phase's tree once a quarter of its leaves have been re-inserted. It never
+looks at the tree. A pile that comes to rest a little short of a quarter keeps that tree for as long as it
+rests, and settled piles were measured searching trees from 1.0 to 2.2 times as dear as fresh ones, by luck of
+their histories alone (step 19).
+
+Now the broad phase also watches its own search. Each search costs some number of node visits; divided by the
+pairs it finds plus the leaves it has (what even a perfect tree pays for), that is a measure of the tree. The
+first search after a rebuild sets the mark. When a search costs a tenth more than the mark, the tree is laid out
+afresh before the next one. A scene that changes (a pile forming) moves the measure too; that costs a rebuild and
+sets a new mark, nothing more. Why a tenth: a rebuild costs about a third of one search (0.15 ms against
+0.45 ms for 2000 leaves), so one bought at a tenth's wear has paid for itself after three quiet steps.
+Thresholds tried on the benchmark piles, 250 to 2000 bodies:
+
+| rule | settled trees, times as dear as fresh | broad phase while 2000 crates / lumps settle (8 s) |
+|---|---|---|
+| a quarter re-inserted (step 15) | 1.00 to 2.16 | 1603 / 2069 ms |
+| ... or a third dearer | 1.01 to 1.27 | 1078 / 1352 |
+| ... or a fifth dearer | 1.00 to 1.17 | 1116 / 1310 |
+| ... or a tenth dearer | 0.94 to 1.05 (chains, never still, 1.14) | 989 / 1347 |
+
+(Under 1 means the tree as it stood was better than a fresh median split, which happens.) Settled, per step:
+
+| scene | broad phase, step 19 | step 20 |
+|---|---|---|
+| crates 1000 | 0.36 ms | 0.28 ms |
+| crates 2000 | 1.48 | 0.97 |
+| lumps 2000 | 2.33 | 1.32 |
+| mixed 2000 | 1.53 | 1.08 |
+
+Two shapes of wear that one might expect turned out not to wear the tree at all: bodies creeping just past their
+padding in a dense pile, and bodies re-inserted anywhere in a sparse scene. What wears it is how a pile forms.
+`StepStats::broadphase_rebuilt` now says when a step rebuilt.
+
+Tests (1, 268 in total): a tree whose searches have become dear is rebuilt once, and then left alone. (Its
+search is made dearer without touching the tree: 512 boxes overlapping their neighbours by 2 cm all shrink by
+2 cm a side, inside their padding, so the same work finds no pairs.) Deliberate breakages: 6; caught: the wear
+never calling for a rebuild, the mark set only at the first rebuild, cost per leaf alone, and the re-insertion
+rule dropped. Not caught: cost per pair alone, without the leaves. That only differs in a scene with no pairs,
+where it is infinite; the leaves are there to keep the measure finite, and no scene was found where it shows.
+A guard against a zero mark went the other way: its breakage survived because the mark can only be zero for a
+tree with no leaves, so it was deleted.
+
 ## Planned next
 
-The broad phase's rebuild rule (above).
+To be decided.

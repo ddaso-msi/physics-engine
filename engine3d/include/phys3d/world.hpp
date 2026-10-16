@@ -29,9 +29,10 @@ struct StepStats {
     std::size_t awake_bodies = 0;        // dynamic bodies being simulated (not asleep)
     std::size_t islands = 0;             // groups of dynamic bodies connected by contacts or joints
     std::size_t ccd_swept = 0;           // bodies moving fast enough to be swept by the continuous pass
-    std::size_t ccd_hits = 0;
+    std::size_t ccd_hits = 0;            // of those, how many it stopped at a static body
     std::size_t gjk_pairs = 0;           // pairs that went through GJK in the narrow phase...
-    std::uint64_t gjk_iterations = 0;    // ...and the GJK iterations they took between them            // of those, how many it stopped at a static body
+    std::uint64_t gjk_iterations = 0;    // ...and the GJK iterations they took between them
+    bool broadphase_rebuilt = false;     // the broad phase laid its tree out afresh this step
     // Milliseconds the last step spent in each phase. (The solver's includes applying gravity; movement's
     // includes the joint position pass; the narrow phase's includes matching contacts to last step's.)
     double ms_broadphase = 0, ms_narrowphase = 0, ms_islands = 0, ms_solver = 0, ms_movement = 0, ms_sweep = 0, ms_sleep = 0;

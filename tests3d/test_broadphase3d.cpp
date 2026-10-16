@@ -314,6 +314,35 @@ TEST(the_broadphase_rebuilds_its_tree_only_after_enough_bodies_have_moved) {
     CHECK(tree.tree().validate());
 }
 
+TEST(a_tree_that_has_become_dear_to_search_is_rebuilt_once_and_then_left_alone) {
+    // The broad phase also watches what each search costs, per pair found and per leaf, against the first
+    // search after its last rebuild. Here the tree itself is never touched: 512 unit boxes in a grid, each
+    // overlapping its neighbours by 2 cm, then all shrunk by 2 cm a side, which keeps them inside their
+    // padding. The search does the same work as before and now finds no pairs: dearer per pair, which calls
+    // for one rebuild. That rebuild becomes the new mark, and from then on nothing changes and nothing is
+    // rebuilt.
+    std::vector<AABB> boxes;
+    for (int i = 0; i < 512; ++i) {
+        const Vec3 c{static_cast<Real>(i % 8) * 0.98f, static_cast<Real>(i / 8 % 8) * 0.98f, static_cast<Real>(i / 64) * 0.98f};
+        boxes.push_back({c - Vec3{0.5f, 0.5f, 0.5f}, c + Vec3{0.5f, 0.5f, 0.5f}});
+    }
+    const std::vector<std::uint8_t> imm(boxes.size(), 0);
+    TreeBroadphase tree;
+    CHECK(tree.find_pairs(boxes, imm).size() > 3000);
+    const int created = tree.rebuilds();
+    for (int frame = 0; frame < 5; ++frame) tree.find_pairs(boxes, imm);
+    CHECK(tree.rebuilds() == created);  // nothing changes, nothing is rebuilt
+
+    for (AABB& b : boxes) b = {b.lo + Vec3{0.02f, 0.02f, 0.02f}, b.hi - Vec3{0.02f, 0.02f, 0.02f}};
+    CHECK(tree.find_pairs(boxes, imm).empty());
+    CHECK(tree.last_moves() == 0 && tree.rebuilds() == created);  // no leaf left its padding...
+    CHECK(tree.find_pairs(boxes, imm).empty());
+    CHECK(tree.rebuilds() == created + 1);  // ...but the last search was dear enough to call for a rebuild
+    for (int frame = 0; frame < 10; ++frame) CHECK(tree.find_pairs(boxes, imm).empty());
+    CHECK(tree.rebuilds() == created + 1);  // and the rebuilt tree is the new mark
+    CHECK(tree.tree().validate());
+}
+
 // Quadrupling the number of evenly spread bodies multiplies brute-force work by 16; the tree must do far better.
 TEST(tree_broadphase_work_grows_sub_quadratically_in_3d) {
     auto measure = [](int n, std::uint64_t& brute, std::uint64_t& tree_tests) {

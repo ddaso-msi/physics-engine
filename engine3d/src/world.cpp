@@ -83,8 +83,10 @@ void World::step(Real dt) {
     if (broadphase == BroadphaseKind::BruteForce) {
         candidates = brute_force_pairs(boxes_, immovable_, &stats_.broadphase_tests);
     } else {
+        const int rebuilds = tree_.rebuilds();
         candidates = tree_.find_pairs(boxes_, immovable_);
         stats_.broadphase_tests = tree_.last_tests();
+        stats_.broadphase_rebuilt = tree_.rebuilds() != rebuilds;
     }
     stats_.candidate_pairs = candidates.size();
 

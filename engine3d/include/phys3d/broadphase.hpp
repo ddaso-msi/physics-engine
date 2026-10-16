@@ -25,7 +25,9 @@ PairList brute_force_pairs(std::span<const AABB> boxes, std::span<const std::uin
 
 // Dynamic AABB tree. Each body's box is stored padded by `margin`; the tree is only touched when a body's
 // real box leaves its padded one. The overlapping pairs are then found by one pass of the tree over itself.
-// Returns exactly the pairs brute_force_pairs does, in the same order.
+// Returns exactly the pairs brute_force_pairs does, in the same order. The tree is laid out afresh when a
+// quarter of its leaves have been re-inserted, or when searching it has become a tenth dearer than it was
+// just after the last time.
 class TreeBroadphase {
 public:
     explicit TreeBroadphase(Real margin = static_cast<Real>(0.1)) : margin_(margin) {}
@@ -45,6 +47,8 @@ private:
     std::size_t churn_ = 0;  // leaves created or re-inserted since the tree was last built from scratch
     int rebuilds_ = 0;
     std::uint64_t tests_ = 0;
+    double fresh_cost_ = 0;  // nodes visited per pair and leaf by the first search after the last rebuild
+    bool worn_ = false;      // the last search cost enough more than that to call for a rebuild
 };
 
 }  // namespace phys3d
