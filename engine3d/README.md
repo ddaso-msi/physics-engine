@@ -852,6 +852,67 @@ that went wrong. Deliberate breakages: the world not reading the cache, not writ
 step, and the triangle routine back in single precision, are all caught. The world reading the wrong pair's
 entry is not: it costs time, never correctness, which the cache-from-anywhere test is there to show.
 
+## Step 18: GJK and EPA in double precision
+
+GJK and EPA now do their own arithmetic in double precision, as the hull builder does; the engine's Real
+is still what goes in and what comes out. The double vector they share is in `src/vec3d.hpp`.
+
+What single precision had cost was not the arithmetic itself but the tolerances it forced. GJK's answers are
+differences of support points, and next to a big shape those are big numbers, placed to a part in ten
+million. So "touching" had to mean "within a ten-thousandth of the shapes' size", which next to a 300 m
+floor is 4 cm. In double the same points are good to 10^-16 of their size, and three tolerances tighten:
+
+| tolerance | single | double |
+|---|---|---|
+| GJK: closer than this counts as touching | 10^-4 of the size | 10^-10 |
+| GJK: a tetrahedron flatter than this encloses nothing | 10^-4 | 10^-9 |
+| EPA: a face this close to the surface is on it | 2 * 10^-5 | 10^-9 |
+
+The floor stress of step 17, now:
+
+| floor half-width | distances wrong by over 1 mm (of 400000) | worst |
+|---|---|---|
+| 5 m | 0 | 1.2 * 10^-7 m |
+| 30 m | 0 (was 1167) | 1.2 * 10^-7 m (was 4.5 mm) |
+| 300 m | 0 (was 26044) | 1.2 * 10^-7 m (was 11 cm) |
+
+The 10^-7 m left over is the shapes' own: a float placing the bottom of a crate. The million-pair audit of
+step 9 used to pass at a tolerance of 2 * 10^-3 of the shapes' size; it now passes at 10^-6 without a single
+failure (step 17's GJK fails 1489 pairs there).
+
+**What did not need to change.** Several other tolerances were tightened too, and putting each back made no
+difference anyone could measure, so they were put back: GJK's convergence test (one part in a million of the
+distance squared; the cores are polytopes, and GJK nearly always ends first by sampling a corner it already
+has), EPA's "two samples are the same point", and how far apart find_deepest_points pulls the shapes.
+Choosing a support corner in double precision made no difference either: a wrong choice is between two corners
+within 10^-7 of a tie.
+
+**What did.** Turning that corner and moving it into place in double. A crate resting on the floor, tilted by
+10^-7 radians by the solver, has its lowest corner 9 * 10^-8 m into the floor. Rounded to single precision and
+then measured in double it came out 1.5 * 10^-8 m above, so the contact began a step later, and a tower that
+had stood exactly as it does on the box code (a test since step 10) ended 2 mm to one side of it. The answer
+had been within a rounding step all along; double precision moved it to the other side of zero. So
+`Convex::core_corner` chooses the corner in the shape's own frame, and GJK turns and places it in double. That
+also makes the answer the same wherever in the world the pair is: added in single precision, the shape's
+position rounded each support point to the float spacing there, a millimetre at 10 km.
+
+Cost: the narrow phase on the GJK paths is 5 to 16% slower (crates on GJK/EPA: 250 0.26 to 0.30 ms, 1000
+1.32 to 1.44; 1000 lumps 3.10 to 3.25), about a third of what step 17 saved. Whole steps are about 3% slower.
+
+One test changed: the pile of boxes and balls had required every body to be below 0.2 m/s at the end, "give
+or take a ball still rolling". With this step a ball was: resting on a crate tilted by 0.1 degrees (which the
+pile leaves it at), it rolled at 0.005 m/s^2, as 5/7 g sin(tilt) less the friction of the wall beside it
+predicts, until it rolled off the crate's edge. Which ball does that changes with any change to the engine.
+The test now requires the crates to be at rest and the balls under 2 m/s.
+
+Tests (3, 266 in total): small shapes near 30 m and 300 m floors get their distance to 10^-5 m, converged,
+on the right side of zero and with level normals; a crate 10^-2 to 10^-5 m above a 300 m floor is found apart
+by GJK, with its distance and both points to a micrometre; 200 pairs give the same answer to a micrometre
+8 km from the origin as at it. Deliberate breakages: each of the three tolerances back to single precision,
+triangle weights rounded to float, the pulled-apart pair not pulled apart, the corner turned in single
+precision, the position added in single precision, the whole support back in single precision: all caught.
+Which of two tied hull points a support returns is not, and need not be: either is right.
+
 ## Planned next
 
-GJK and EPA in double precision.
+To be decided.

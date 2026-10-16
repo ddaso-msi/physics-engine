@@ -486,14 +486,19 @@ TEST(a_pile_of_boxes_and_balls_settles_on_the_convex_path) {
             for (const ContactPair& c : w.contacts())
                 if (!c.dormant) deepest = std::max(deepest, c.manifold.depth);
     }
-    Real fastest = 0;
+    Real fastest_crate = 0, fastest_ball = 0;
     for (size_t i = first; i < w.bodies.size(); ++i) {
         const Body& b = w.bodies[i];
         CHECK(b.pos.y > 0.2f);  // nothing sank into the floor
         CHECK(std::fabs(b.pos.x) < 4 && std::fabs(b.pos.z) < 4);
+        Real& fastest = b.shape.type == Shape::Type::Sphere ? fastest_ball : fastest_crate;
         fastest = std::max(fastest, b.vel.length());
     }
-    CHECK(fastest < 0.2f);   // at rest, give or take a ball still rolling
+    // The crates are at rest. A ball need not be: nothing slows a rolling ball, and on a crate tilted by a
+    // tenth of a degree it rolls (and may roll off and drop). Which ball, and when, changes with any change
+    // to the engine; what does not is that the balls are rolling, not flying about.
+    CHECK(fastest_crate < 0.2f);
+    CHECK(fastest_ball < 2);
     CHECK(deepest < 0.05f);  // and once settled nothing is squeezed deep into anything
 }
 

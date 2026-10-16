@@ -62,7 +62,9 @@ struct Convex {
     static Convex of(const Body& body);
 
     // The core's point farthest along world direction d (any length, not zero).
-    Vec3 core_support(Vec3 d) const;
+    Vec3 core_support(Vec3 d) const { return pos + rotate(q, core_corner(d)); }
+    // The same point in the shape's own frame, before it is turned and placed (GJK does that in double).
+    Vec3 core_corner(Vec3 d) const;
     // The whole shape's.
     Vec3 support(Vec3 d) const { return core_support(d) + d.normalized() * radius; }
 };

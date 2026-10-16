@@ -597,6 +597,76 @@ TEST(shapes_on_floors_of_30_and_300_metres_get_level_normals) {
         }
 }
 
+// ---- in double precision ----------------------------------------------------------------------------
+
+TEST(small_shapes_near_huge_floors_get_the_distance_to_a_hundredth_of_a_millimetre) {
+    // The floor stress of step 17, smaller: shapes from 5 cm into the floor to 30 cm above it. In single
+    // precision distances near the 300 m floor were out by up to 11 cm; now the worst is rounding, 10^-7 m.
+    Lcg rng;
+    for (const Real floor_half : {30.0f, 300.0f}) {
+        const Convex floor = Convex::box({floor_half, 0.5f, floor_half}, {0, -0.5f, 0});
+        Real worst = 0;
+        int wrong_side = 0, unconverged = 0, tilted = 0;
+        for (int trial = 0; trial < 3000; ++trial) {
+            RandomShape s;
+            make_shape(s, trial % 5, rng, {rng.range(-3, 3), 0, rng.range(-3, 3)}, rng.range(0.1f, 0.5f));
+            const Real low = dot(s.convex.support({0, -1, 0}), {0, 1, 0});
+            s.convex.pos.y += -low + rng.range(-0.05f, 0.3f);
+            const Real exact = dot(s.convex.support({0, -1, 0}), {0, 1, 0});  // the lowest point's height
+            for (int order = 0; order < 2; ++order) {
+                const ClosestResult r = order ? closest(s.convex, floor) : closest(floor, s.convex);
+                worst = std::max(worst, std::fabs(r.distance - exact));
+                wrong_side += (exact > 1e-5f && r.distance <= 0) || (exact < -1e-5f && r.distance >= 0);
+                unconverged += !r.converged;
+                tilted += cross(r.normal, Vec3{0, 1, 0}).length() > 1e-4f;
+            }
+        }
+        CHECK(worst < 1e-5f);
+        CHECK(wrong_side == 0);
+        CHECK(unconverged == 0);
+        CHECK(tilted == 0);
+    }
+}
+
+TEST(eight_kilometres_from_the_origin_the_answer_is_the_same_to_a_micrometre) {
+    // Single precision spaces numbers a millimetre apart out there. The positions below are exactly
+    // representable both here and there, so the two pairs are exactly the same shapes, and any difference
+    // in the answers is rounding inside GJK and EPA.
+    Lcg rng;
+    const Vec3 far{8192, 512, -4096};
+    for (int trial = 0; trial < 200; ++trial) {
+        RandomShape a, b;
+        make_shape(a, trial % 5, rng, {}, 1);
+        // b somewhere from overlapping a to a metre clear of it, at multiples of 1/1024 m.
+        const Vec3 at = Vec3{std::round(rng.range(-2, 2) * 1024), std::round(rng.range(-2, 2) * 1024), std::round(rng.range(-2, 2) * 1024)} / 1024;
+        make_shape(b, (trial / 5) % 5, rng, at, 1);
+        const ClosestResult here = closest(a.convex, b.convex);
+        a.convex.pos += far;
+        b.convex.pos += far;
+        const ClosestResult there = closest(a.convex, b.convex);
+        CHECK_NEAR(there.distance, here.distance, 1e-6);
+        CHECK(dot(there.normal, here.normal) > 1 - 1e-6f);
+    }
+}
+
+TEST(a_crate_a_hair_above_a_300_metre_floor_is_not_touching_it) {
+    // In single precision anything within 4 cm of this floor read as touching it, and EPA took over.
+    const Convex floor = Convex::box({300, 0.5f, 300}, {0, -0.5f, 0});
+    for (const Real gap : {1e-2f, 1e-3f, 1e-4f, 1e-5f}) {
+        const Convex crate = Convex::box({0.5f, 0.5f, 0.5f}, {120, 0.5f + gap, -40}, Quat::from_axis_angle({0, 1, 0}, 0.3f));
+        const Real exact = dot(crate.support({0, -1, 0}), {0, 1, 0});
+        for (int order = 0; order < 2; ++order) {
+            const ClosestResult r = order ? closest(crate, floor) : closest(floor, crate);
+            CHECK(r.epa_iterations == 0);  // GJK found them apart
+            CHECK_NEAR(r.distance, exact, 1e-6);
+            CHECK(cross(r.normal, Vec3{0, 1, 0}).length() < 1e-5f);
+            const Vec3 on_floor = order ? r.point_b : r.point_a, on_crate = order ? r.point_a : r.point_b;
+            CHECK_NEAR(on_floor.y, 0, 1e-6);
+            CHECK_NEAR(on_crate.y, exact, 1e-6);
+        }
+    }
+}
+
 // ---- starting from last step's answer -------------------------------------------------------------
 
 TEST(a_warm_cache_gives_the_same_answer_in_fewer_steps) {

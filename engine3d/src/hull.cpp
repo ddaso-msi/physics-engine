@@ -1,5 +1,7 @@
 #include <phys3d/hull.hpp>
 
+#include "vec3d.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -12,18 +14,7 @@ namespace {
 // cloud's size, and single precision cannot place the plane of a thin triangle that well: a triangle a
 // hundredth as wide as it is long has a normal good to about one part in 100000, which is the whole
 // tolerance gone. The engine's Real is used for what goes in and what comes out.
-struct Vec {
-    double x = 0, y = 0, z = 0;
-    Vec() = default;
-    Vec(double x_, double y_, double z_) : x(x_), y(y_), z(z_) {}
-    explicit Vec(Vec3 v) : x(v.x), y(v.y), z(v.z) {}
-    double length() const { return std::sqrt(x * x + y * y + z * z); }
-};
-Vec operator-(Vec a, Vec b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-Vec operator*(Vec a, double s) { return {a.x * s, a.y * s, a.z * s}; }
-double dot(Vec a, Vec b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-Vec cross(Vec a, Vec b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
-double distance(Vec a, Vec b) { return (a - b).length(); }
+using Vec = Vec3d;
 
 struct Triangle {
     int v[3];     // indices into the input points, counter-clockwise seen from outside
