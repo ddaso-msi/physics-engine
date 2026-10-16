@@ -63,9 +63,11 @@ World build(Kind kind, int count, NarrowPhase path) {
     w.allow_sleep = false;
     Lcg rng;
     if (kind == Kind::Chains) {
-        // Chains of 10 links hung in a grid, each started leaning so that neighbours collide.
+        // Chains of 10 links hung in a grid, each started leaning so that neighbours collide. A chain is 7 m
+        // long and leans up to 55 degrees, so the room reaches 7 m beyond the outermost: with less, the
+        // chains in the corners started through the walls and were torn apart.
         const int chains = count / 10, side = static_cast<int>(std::ceil(std::sqrt(static_cast<Real>(chains))));
-        add_room(w, static_cast<Real>(side) * 1.2f + 2);
+        add_room(w, static_cast<Real>(side) * 1.2f + 7);
         for (int c = 0; c < chains; ++c) {
             const Vec3 top{(static_cast<Real>(c % side) - static_cast<Real>(side) * 0.5f) * 2.4f, 9, (static_cast<Real>(c / side) - static_cast<Real>(side) * 0.5f) * 2.4f};
             const Vec3 lean = Vec3{rng.range(-1, 1), -1, rng.range(-1, 1)}.normalized();

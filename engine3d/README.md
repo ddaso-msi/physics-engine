@@ -913,6 +913,75 @@ triangle weights rounded to float, the pulled-apart pair not pulled apart, the c
 precision, the position added in single precision, the whole support back in single precision: all caught.
 Which of two tied hull points a support returns is not, and need not be: either is right.
 
+## Step 19: solver speed
+
+After the narrow phase work of steps 15 to 18, the solver was the biggest phase in the crate scenes: 1.1 ms
+of a 1.9 ms step at 1000 crates. Timed on its own on a snapshot of a settled pile (the same bodies and
+contacts every run), 90% of that was the ten sweeps, about 30 ns per contact point per sweep, and arithmetic
+turned out to be the smaller part of it.
+
+Four changes, each measured on 1000 crates (solver alone):
+
+| change | solver |
+|---|---|
+| step 18 | 1.18 ms |
+| rows in Jacobian form: r x dir and I^-1 (r x dir) worked out once per step, so a sweep never multiplies by an inertia matrix or takes a cross product (as the joint rows already did) | 1.04 ms |
+| each contact's two velocities read into locals at its start and written back at its end, so its rows work in registers and not through memory | 0.86 ms |
+| ... and written back only to bodies that can move | 0.75 ms |
+| contacts solved in colour order (below) | 0.56 ms |
+
+The last two are the same discovery. Gauss-Seidel is a chain: each contact starts from the velocities the
+last one left, and the processor cannot begin one until it knows them. Every contact with the floor used to
+write the floor's velocity (adding zero to it) and the next floor contact had to wait to read it: a chain
+through one memory location from one end of the pile to the other. And contacts sorted by body pair nearly
+always share a body with the one before ((5, 7), (5, 9), (5, 12)). So `solving_order` colours them greedily:
+each takes the lowest colour no earlier contact on either of its moving bodies has, and they are solved colour
+by colour. Within a colour no two share a moving body, and the processor overlaps them. The joints get the
+same: a joint's rows (which share its bodies) are solved in registers, and joints are coloured too, which more
+than halves the joint sweeps of the chains scene (a chain's joints all share a link with the next).
+
+The first three changes give the same answers to rounding (1.6 * 10^-7 m/s apart, on velocities of 0.1). The
+colour order changes the order, and with ten sweeps that are not run to convergence the order shows: one step's
+velocities differ by up to 0.07 m/s. What matters is whether piles settle as well, and they do:
+
+| 1000 bodies, after 8 s | mean speed (old / new) | mean depth | deepest |
+|---|---|---|---|
+| crates | 8 * 10^-9 / 3 * 10^-7 m/s | 2.57 / 2.56 mm | 14.7 / 14.2 mm |
+| lumps | 1.2 * 10^-5 / 2.3 * 10^-8 | 2.12 / 2.10 | 25.3 / 17.9 |
+| 4000 crates | 1.5 * 10^-8 / 1.6 * 10^-8 | 2.58 / 2.57 | 15.6 / 15.5 |
+
+**The joint position pass** (the "move" column of the chains scene) prepared each joint once more than it has
+rows, and rebuilt its stand-in for the world each time: 0.89 to 0.68 ms at 1000 joints, the same corrections.
+
+**The benchmark's chains scene was broken.** A chain is 7 m long and leans up to 55 degrees, and the room ended
+2 m beyond the outermost chains: the corner chains started through the walls, were pushed out the far side
+while their joints pulled them back, and their last links flew off at up to 276 m/s and hung metres from
+their chains. Every chains number in the tables above (steps 15 to 18) timed that. The room now reaches 7 m
+beyond them, and no joint opens more than 2 mm.
+
+In the world, step 18 against step 19, both on the fixed chains scene:
+
+| scene | solver | step |
+|---|---|---|
+| crates 1000 | 1.11 to 0.59 ms | 1.86 to 1.45 ms |
+| lumps 1000 | 1.16 to 0.61 | 4.93 to 4.34 |
+| chains 1000 | 0.58 to 0.25 (and position pass 0.95 to 0.74) | 1.90 to 1.38 |
+| crates 2000 | 2.29 to 1.21 | 4.26 to 3.66 |
+
+**Something this showed, not fixed here.** The broad phase reads slower in step 19 (2000 crates 0.94 to 1.41 ms)
+for no reason of its own: its tree is only laid out afresh after a quarter of its leaves have been re-inserted,
+so a pile that comes to rest keeps whatever tree it had, and a different history leaves a different tree. Laid
+out afresh, the settled trees of either step take the same 123000 to 137000 node visits per step; as left, they
+took 130000 to 296000 depending on luck.
+
+Tests (1, 267 in total): three pendulums hung from the world move bit for bit as each does alone (the order
+joints are solved in must not matter to bodies that share nothing, and joints to the world, all with first body
+-1, must not be mixed up). One test changed: the broad-phase equivalence test counted awake contacts and needed
+more than 10; with this step its pyramid is asleep by then, so it counts stored ones. Deliberate breakages: 17,
+15 caught, one of them (joint rows grouped by their first body alone) only once the pendulum test was written
+for it. Not caught: writing back to static bodies, and everything in one colour; both cost time and never
+change a result.
+
 ## Planned next
 
-To be decided.
+The broad phase's rebuild rule (above).

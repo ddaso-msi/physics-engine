@@ -1,5 +1,7 @@
 #include <phys3d/solver.hpp>
 
+#include "solving_order.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <unordered_map>
@@ -41,42 +43,66 @@ void transfer_impulses(const std::vector<ContactPair>& previous, std::vector<Con
 
 namespace {
 
+// One row of a contact: the impulse along `dir` (the normal or a tangent) at a point ra from a's centre of
+// mass and rb from b's. Everything about the two bodies' turning that the sweeps need is worked out here,
+// once, so that a sweep never multiplies by an inertia matrix or takes a cross product:
+//   the speed along dir is   dot(vb - va, dir) + dot(wb, rb x dir) - dot(wa, ra x dir)
+//   an impulse lambda along dir changes   va by -dir lambda / ma,  wa by -IA^-1 (ra x dir) lambda,
+//                                         vb by +dir lambda / mb,  wb by +IB^-1 (rb x dir) lambda.
+// (the same Jacobian form the joint rows use).
+struct Row {
+    Vec3 ja, jb;  // ra x dir, rb x dir
+    Vec3 ka, kb;  // IA^-1 ja, IB^-1 jb
+    Real mass = 0;  // 1 / (1/ma + 1/mb + ja . ka + jb . kb)
+
+    void prepare(Vec3 ra, Vec3 rb, Vec3 dir, const Mat3& inv_ia, const Mat3& inv_ib, Real inv_ma, Real inv_mb) {
+        ja = cross(ra, dir);
+        jb = cross(rb, dir);
+        ka = inv_ia * ja;
+        kb = inv_ib * jb;
+        const Real k = inv_ma + inv_mb + dot(ja, ka) + dot(jb, kb);
+        mass = k > 0 ? 1 / k : 0;
+    }
+};
+
 struct PointConstraint {
-    Vec3 ra, rb;  // contact point relative to each body's centre of mass
-    Real normal_mass = 0;
-    Real tangent_mass[2] = {0, 0};
+    Row normal, tangent[2];
     Real bias = 0;  // the normal speed we want to reach (>= 0)
     Real normal_impulse = 0;
     Real tangent_impulse[2] = {0, 0};
 };
 
+// The two bodies' velocities while one contact is being solved. They are read into these at the start and
+// written back at the end, so the rows in between work in registers; and they are written back only to a
+// body that can move. Every contact with the floor would otherwise write the floor's (unchanging) velocity
+// and the next would have to wait to read it: a chain through memory from one end of the pile to the other.
+struct Motion {
+    Vec3 va, wa, vb, wb;
+};
+
 struct ContactConstraint {
     Body* a = nullptr;
     Body* b = nullptr;
-    Mat3 inv_ia, inv_ib;  // world-frame inverse inertia, fixed for the duration of the solve
+    Real inv_ma = 0, inv_mb = 0;
     Vec3 normal, tangent[2];
     Real friction = 0;
     int count = 0;
     size_t source = 0;  // index of the ContactPair this came from (dormant pairs are skipped)
     PointConstraint points[Manifold::kMaxPoints];
+
+    Motion load() const { return {a->vel, a->w, b->vel, b->w}; }
+    void store(const Motion& m) const {
+        if (a->type == BodyType::Dynamic) a->vel = m.va, a->w = m.wa;
+        if (b->type == BodyType::Dynamic) b->vel = m.vb, b->w = m.wb;
+    }
+    static Real speed(const Motion& m, const Row& r, Vec3 dir) { return dot(m.vb - m.va, dir) + dot(m.wb, r.jb) - dot(m.wa, r.ja); }
+    void push(Motion& m, const Row& r, Vec3 dir, Real lambda) const {
+        m.va -= dir * (inv_ma * lambda);
+        m.wa -= r.ka * lambda;
+        m.vb += dir * (inv_mb * lambda);
+        m.wb += r.kb * lambda;
+    }
 };
-
-Vec3 relative_velocity(const ContactConstraint& c, const PointConstraint& p) {
-    return c.b->vel + cross(c.b->w, p.rb) - c.a->vel - cross(c.a->w, p.ra);
-}
-
-// Equal and opposite impulse at the contact point: +impulse on b, -impulse on a.
-void apply_impulse(ContactConstraint& c, const PointConstraint& p, Vec3 impulse) {
-    c.a->vel -= impulse * c.a->inv_mass;
-    c.a->w -= c.inv_ia * cross(p.ra, impulse);
-    c.b->vel += impulse * c.b->inv_mass;
-    c.b->w += c.inv_ib * cross(p.rb, impulse);
-}
-
-Real effective_inverse_mass(const ContactConstraint& c, const PointConstraint& p, Vec3 dir) {
-    return c.a->inv_mass + c.b->inv_mass + dot(dir, cross(c.inv_ia * cross(p.ra, dir), p.ra)) +
-           dot(dir, cross(c.inv_ib * cross(p.rb, dir), p.rb));
-}
 
 }  // namespace
 
@@ -90,36 +116,36 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     std::vector<ContactConstraint> constraints;
     constraints.reserve(contacts.size());
 
-    for (size_t source = 0; source < contacts.size(); ++source) {
+    // Solved colour by colour (see solving_order.hpp).
+    const std::vector<size_t> order = solving_order(bodies, contacts.size(), [&](size_t i, int& a, int& b) {
+        a = contacts[i].a, b = contacts[i].b;
+        return !contacts[i].dormant;
+    });
+    for (const size_t source : order) {
         const ContactPair& pair = contacts[source];
-        if (pair.dormant) continue;
         ContactConstraint c;
         c.source = source;
         c.a = &bodies[static_cast<size_t>(pair.a)];
         c.b = &bodies[static_cast<size_t>(pair.b)];
-        c.inv_ia = c.a->inv_inertia_world();
-        c.inv_ib = c.b->inv_inertia_world();
         c.normal = pair.manifold.normal;
         tangent_basis(c.normal, c.tangent[0], c.tangent[1]);
         c.friction = std::sqrt(c.a->friction * c.b->friction);
         c.count = pair.manifold.count;
         const Real restitution = std::max(c.a->restitution, c.b->restitution);
 
+        c.inv_ma = c.a->inv_mass;
+        c.inv_mb = c.b->inv_mass;
+        const Mat3 inv_ia = c.a->inv_inertia_world(), inv_ib = c.b->inv_inertia_world();
+        const Motion m = c.load();
         for (int k = 0; k < c.count; ++k) {
             const ContactPoint& cp = pair.manifold.points[k];
             PointConstraint& p = c.points[k];
-            p.ra = cp.point - c.a->pos;
-            p.rb = cp.point - c.b->pos;
-
-            const Real kn = effective_inverse_mass(c, p, c.normal);
-            p.normal_mass = kn > 0 ? 1 / kn : 0;
-            for (int t = 0; t < 2; ++t) {
-                const Real kt = effective_inverse_mass(c, p, c.tangent[t]);
-                p.tangent_mass[t] = kt > 0 ? 1 / kt : 0;
-            }
+            const Vec3 ra = cp.point - c.a->pos, rb = cp.point - c.b->pos;
+            p.normal.prepare(ra, rb, c.normal, inv_ia, inv_ib, c.inv_ma, c.inv_mb);
+            for (int t = 0; t < 2; ++t) p.tangent[t].prepare(ra, rb, c.tangent[t], inv_ia, inv_ib, c.inv_ma, c.inv_mb);
 
             // Bounce (fixed up front from the arrival speed) or push-out of any overlap, as in 2D.
-            const Real approach = dot(relative_velocity(c, p), c.normal);
+            const Real approach = c.speed(m, p.normal, c.normal);
             const Real bounce = approach < -settings.restitution_threshold ? -restitution * approach : 0;
             const Real push_out = settings.baumgarte / dt * std::max(cp.depth - settings.slop, Real(0));
             p.bias = std::max(bounce, push_out);
@@ -135,23 +161,27 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     // Warm start, as a separate pass after every constraint has measured its arrival speed.
     if (settings.warm_starting) {
         joint_solver.warm_start();
-        for (ContactConstraint& c : constraints)
+        for (ContactConstraint& c : constraints) {
+            Motion m = c.load();
             for (int k = 0; k < c.count; ++k) {
                 const PointConstraint& p = c.points[k];
-                apply_impulse(c, p, c.normal * p.normal_impulse + c.tangent[0] * p.tangent_impulse[0] + c.tangent[1] * p.tangent_impulse[1]);
+                c.push(m, p.normal, c.normal, p.normal_impulse);
+                for (int t = 0; t < 2; ++t) c.push(m, p.tangent[t], c.tangent[t], p.tangent_impulse[t]);
             }
+            c.store(m);
+        }
     }
 
     for (int sweep = 0; sweep < settings.iterations; ++sweep) {
         joint_solver.solve_velocity();
         for (ContactConstraint& c : constraints) {
+            Motion m = c.load();
             // Friction first; the normal constraint gets the last word in each sweep.
             for (int k = 0; k < c.count; ++k) {
                 PointConstraint& p = c.points[k];
-                const Vec3 rv = relative_velocity(c, p);
                 // Solve the two tangent rows, then limit the LENGTH of the accumulated friction impulse.
                 Real total[2];
-                for (int t = 0; t < 2; ++t) total[t] = p.tangent_impulse[t] - dot(rv, c.tangent[t]) * p.tangent_mass[t];
+                for (int t = 0; t < 2; ++t) total[t] = p.tangent_impulse[t] - c.speed(m, p.tangent[t], c.tangent[t]) * p.tangent[t].mass;
                 const Real limit = c.friction * p.normal_impulse;
                 const Real length_sq = total[0] * total[0] + total[1] * total[1];
                 if (length_sq > limit * limit) {
@@ -159,20 +189,21 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
                     total[0] *= scale;
                     total[1] *= scale;
                 }
-                const Vec3 delta = c.tangent[0] * (total[0] - p.tangent_impulse[0]) + c.tangent[1] * (total[1] - p.tangent_impulse[1]);
-                p.tangent_impulse[0] = total[0];
-                p.tangent_impulse[1] = total[1];
-                apply_impulse(c, p, delta);
+                for (int t = 0; t < 2; ++t) {
+                    c.push(m, p.tangent[t], c.tangent[t], total[t] - p.tangent_impulse[t]);
+                    p.tangent_impulse[t] = total[t];
+                }
             }
             for (int k = 0; k < c.count; ++k) {
                 PointConstraint& p = c.points[k];
-                const Real approach = dot(relative_velocity(c, p), c.normal);
-                Real lambda = -(approach - p.bias) * p.normal_mass;
+                const Real approach = c.speed(m, p.normal, c.normal);
+                Real lambda = -(approach - p.bias) * p.normal.mass;
                 const Real total = std::max(p.normal_impulse + lambda, Real(0));  // push, never pull
                 lambda = total - p.normal_impulse;
                 p.normal_impulse = total;
-                apply_impulse(c, p, c.normal * lambda);
+                c.push(m, p.normal, c.normal, lambda);
             }
+            c.store(m);
         }
     }
 

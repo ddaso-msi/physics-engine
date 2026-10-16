@@ -1,5 +1,7 @@
 #include <phys3d/joints.hpp>
 
+#include "solving_order.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -133,13 +135,22 @@ void apply_displacement(JointRow& r, Real lambda) {
 void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Real dt, const SolverSettings& s,
                           bool for_velocity) {
     rows_.clear();
-    world_ = Body::fixed({});
 
-    for (Joint& j : joints) {
-        // A joint whose bodies are all asleep (or fixed) has nothing to do; its stored impulses wait.
-        const bool live = (j.a >= 0 && bodies[static_cast<size_t>(j.a)].is_active()) ||
-                          (j.b >= 0 && bodies[static_cast<size_t>(j.b)].is_active());
-        if (!live) continue;
+    // A joint whose bodies are all asleep (or fixed) has nothing to do; its stored impulses wait. The rest are
+    // taken colour by colour (see solving_order.hpp), unless there is only one: the position pass prepares
+    // one joint at a time, many times a step, and has no order to choose.
+    auto live = [&](const Joint& j) {
+        return (j.a >= 0 && bodies[static_cast<size_t>(j.a)].is_active()) || (j.b >= 0 && bodies[static_cast<size_t>(j.b)].is_active());
+    };
+    const bool coloured = joints.size() > 1;
+    std::vector<size_t> order;
+    if (coloured) order = solving_order(bodies, joints.size(), [&](size_t i, int& a, int& b) {
+        a = joints[i].a, b = joints[i].b;
+        return live(joints[i]);
+    });
+    for (size_t k = 0; k < (coloured ? order.size() : joints.size()); ++k) {
+        Joint& j = joints[coloured ? order[k] : k];
+        if (!coloured && !live(j)) continue;
         Body* A = j.a < 0 ? &world_ : &bodies[static_cast<size_t>(j.a)];
         Body* B = j.b < 0 ? &world_ : &bodies[static_cast<size_t>(j.b)];
         const Mat3 inv_ia = A->inv_inertia_world(), inv_ib = B->inv_inertia_world();
@@ -309,12 +320,29 @@ void JointSolver::warm_start() {
 }
 
 void JointSolver::solve_velocity() {
-    for (JointRow& r : rows_) {
-        Real lambda = -r.mass * (r.velocity() + r.bias + r.softness * r.impulse);
-        const Real total = std::clamp(r.impulse + lambda, r.lower, r.upper);  // clamp the ACCUMULATED impulse
-        lambda = total - r.impulse;
-        r.impulse = total;
-        apply_impulse(r, lambda);
+    // A joint's rows come one after another and all act on the same two bodies, so their velocities are read
+    // once, the rows solved on copies held in registers, and written back once, and only to a body that can
+    // move (as the contacts do; see solver.cpp).
+    for (size_t first = 0; first < rows_.size();) {
+        Body* a = rows_[first].a;
+        Body* b = rows_[first].b;
+        Vec3 va = a->vel, wa = a->w, vb = b->vel, wb = b->w;
+        size_t i = first;
+        for (; i < rows_.size() && rows_[i].a == a && rows_[i].b == b; ++i) {
+            JointRow& r = rows_[i];
+            const Real jv = dot(r.lin_a, va) + dot(r.ang_a, wa) + dot(r.lin_b, vb) + dot(r.ang_b, wb);
+            Real lambda = -r.mass * (jv + r.bias + r.softness * r.impulse);
+            const Real total = std::clamp(r.impulse + lambda, r.lower, r.upper);  // clamp the ACCUMULATED impulse
+            lambda = total - r.impulse;
+            r.impulse = total;
+            va += r.lin_a * (a->inv_mass * lambda);
+            wa += r.inv_i_ang_a * lambda;
+            vb += r.lin_b * (b->inv_mass * lambda);
+            wb += r.inv_i_ang_b * lambda;
+        }
+        if (a->type == BodyType::Dynamic) a->vel = va, a->w = wa;
+        if (b->type == BodyType::Dynamic) b->vel = vb, b->w = wb;
+        first = i;
     }
 }
 
@@ -330,8 +358,12 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
             // its bodies, so correcting one changes the error of the others: closing a hinge's point turns
             // the body, which changes its angle, and turning it back to a limit moves the point. Corrected
             // all together from one measurement they overshoot against each other and never settle.
-            for (size_t k = 0;; ++k) {
-                solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
+            // (The rows are measured afresh before each, but not once more after the last: a joint has the
+            // same rows whatever its pose, except that a ball joint's cone row is left out while the two axes
+            // are exactly in line, and a row added that way would have no error to correct.)
+            solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
+            for (size_t k = 0; k < solver.rows().size(); ++k) {
+                if (k > 0) solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
                 if (k >= solver.rows().size()) break;
                 JointRow& r = solver.rows_mutable()[k];
                 if (r.error == 0 || r.mass <= 0) continue;

@@ -139,7 +139,9 @@ public:
 
 private:
     std::vector<JointRow> rows_;
-    Body world_;  // stands in for body index -1: immovable, at the origin, unrotated
+    // Stands in for body index -1: immovable, at the origin, unrotated. Nothing can move it (it has no mass
+    // to divide by), so it is made once, not each time the rows are.
+    Body world_ = Body::fixed({});
 };
 
 // Position correction, run after the bodies have moved: shifts positions and orientations directly to

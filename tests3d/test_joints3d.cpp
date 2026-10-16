@@ -135,6 +135,36 @@ TEST(a_ball_jointed_pendulum_swings_with_the_textbook_period) {
     CHECK(std::fabs(w.bodies[0].pos.z) < 1e-4f);  // and stays in its plane
 }
 
+TEST(pendulums_that_share_nothing_swing_bit_for_bit_as_they_would_alone) {
+    // Three pendulums hung from the world, far apart: each must move exactly as it does in a world of its
+    // own. The solver may take joints in any order (it colours them; see solving_order.hpp), and with no
+    // moving body in common the order cannot change a single bit. It must also never mix up whose
+    // velocities it is working on: all three are joints to the world, index -1, and so come one after
+    // another with the same first body.
+    auto hang = [](World& w, int kind, Real x) {
+        const int bob = w.add(Body::solid_box({0.1f, 0.2f, 0.1f}, 1, {x + 0.6f, -0.8f, 0.3f}, Quat::from_axis_angle({1, 2, 3}, 0.4f)));
+        w.bodies[static_cast<size_t>(bob)].w = {0.5f, -1, 2};
+        const Vec3 pivot{x, 0, 0};
+        if (kind == 0) w.add_joint(Joint::ball(w.bodies, -1, bob, pivot));
+        if (kind == 1) w.add_joint(Joint::hinge(w.bodies, -1, bob, pivot, {0, 0, 1}));
+        if (kind == 2) w.add_joint(Joint::distance(w.bodies, -1, bob, pivot, {x + 0.6f, -0.6f, 0.3f}));
+        return bob;
+    };
+    World together;
+    for (int kind = 0; kind < 3; ++kind) hang(together, kind, static_cast<Real>(kind) * 10);
+    for (int i = 0; i < 300; ++i) together.step(kDt);
+    for (int kind = 0; kind < 3; ++kind) {
+        World alone;
+        hang(alone, kind, static_cast<Real>(kind) * 10);
+        for (int i = 0; i < 300; ++i) alone.step(kDt);
+        const Body &a = alone.bodies[0], &b = together.bodies[static_cast<size_t>(kind)];
+        CHECK(a.pos.x == b.pos.x && a.pos.y == b.pos.y && a.pos.z == b.pos.z);
+        CHECK(a.q.x == b.q.x && a.q.y == b.q.y && a.q.z == b.q.z && a.q.w == b.q.w);
+        CHECK(a.vel.x == b.vel.x && a.w.y == b.w.y && a.w.z == b.w.z);
+        CHECK(a.vel.length() + a.w.length() > 0.1f);  // it is still moving
+    }
+}
+
 TEST(a_ball_joint_leaves_all_three_rotations_free) {
     // No gravity, pinned at its own centre: the joint must not touch the spin at all. (A sphere, so there
     // is no gyroscopic wobble to confuse the picture.)

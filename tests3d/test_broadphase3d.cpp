@@ -379,7 +379,8 @@ TEST(simulation_is_identical_with_either_broadphase_in_3d) {
         CHECK(a.q.x == b.q.x && a.q.w == b.q.w && a.vel.y == b.vel.y && a.w.z == b.w.z);
     }
     CHECK(brute.stats().contacts == tree.stats().contacts);
-    CHECK(brute.stats().contacts > 10);
+    CHECK(brute.contacts().size() == tree.contacts().size());
+    CHECK(brute.contacts().size() > 10);  // (stored contacts: by now the pyramid may be asleep, its contacts dormant)
     CHECK(tree.stats().candidate_pairs >= tree.stats().contacts);
     CHECK(tree.broadphase_tree().validate());
     CHECK(tree.broadphase_tree().proxy_count() == static_cast<int>(tree.bodies.size()));
