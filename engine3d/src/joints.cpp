@@ -17,6 +17,8 @@ constexpr Real kInf = std::numeric_limits<Real>::infinity();
 // than teleported.
 constexpr Real kMaxLinearCorrection = static_cast<Real>(0.2);
 constexpr Real kMaxAngularCorrection = static_cast<Real>(0.14);  // about 8 degrees
+// Errors below which the joint trees' position pass is not repeated: a millimetre, or a milliradian.
+constexpr Real kTreesSettled = static_cast<Real>(1e-3);
 
 Vec3 to_local(const std::vector<Body>& bodies, int index, Vec3 world) {
     return index < 0 ? world : apply_inv(bodies[static_cast<size_t>(index)].transform(), world);
@@ -185,6 +187,7 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
     rows_.clear();
     counted_ = 0;
     first_row_.clear();
+    joint_of_.clear();
 
     // A joint whose bodies are all asleep (or fixed) has nothing to do; its stored impulses wait. The rest are
     // taken colour by colour (see solving_order.hpp), unless there is only one: the position pass prepares
@@ -203,6 +206,7 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
         Body* B = j.b < 0 ? &world_ : &bodies[static_cast<size_t>(j.b)];
         const Mat3 inv_ia = A->inv_inertia_world(), inv_ib = B->inv_inertia_world();
         first_row_.push_back(static_cast<int>(rows_.size()));
+        joint_of_.push_back(static_cast<int>(&j - joints.data()));
 
         // Velocity pass: move last step's impulses aside; slots not claimed by a row this step end up zero.
         Real old[Joint::kMaxRows] = {};
@@ -404,24 +408,77 @@ void JointSolver::solve_velocity(bool exactly) {
     if (exactly) trees_->solve(rows_);
 }
 
+void JointSolver::correct_trees(std::vector<Body>& bodies, Real max_linear, Real max_angular, std::vector<std::uint8_t>& taken,
+                                std::vector<Real>& error) {
+    std::vector<int> first = first_row_;
+    first.push_back(static_cast<int>(rows_.size()));
+    std::vector<std::uint8_t> by_position;
+    trees_->build(bodies, rows_, first, &by_position);
+    std::vector<Real> largest(by_position.size(), 0);
+    trees_->correct(rows_, max_linear, max_angular, largest);
+    for (size_t k = 0; k < by_position.size(); ++k)
+        if (by_position[k]) {
+            taken[static_cast<size_t>(joint_of_[k])] = 1;
+            error[static_cast<size_t>(joint_of_[k])] = largest[k];
+        }
+}
+
 void JointSolver::store() {
     for (const JointRow& r : rows_) *r.store = r.impulse;
 }
 
 void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings) {
-    JointSolver solver;
+    JointSolver solver, all;
+    std::vector<std::uint8_t> taken, sub_taken;
+    std::vector<Real> error, sub_error;
+    std::vector<size_t> again, still;  // the joints of trees that need another pass
+    std::vector<Joint> sub;
     for (int pass = 0; pass < settings.joint_position_iterations; ++pass) {
-        for (Joint& joint : joints) {
-            // One ROW at a time, each measured from the poses as they are right now. A joint's rows share
-            // its bodies, so correcting one changes the error of the others: closing a hinge's point turns
-            // the body, which changes its angle, and turning it back to a limit moves the point. Corrected
-            // all together from one measurement they overshoot against each other and never settle.
-            // Each row is measured afresh, and only that row is built. (Not once more after the last: a joint
-            // has the same rows whatever its pose, except that a ball joint's cone row is left out while the
-            // two axes are exactly in line, and a row added that way would have no error to correct.) The
-            // exception is the three rows of an anchor point, corrected together (correct_anchor, above), in
+        // First the joints that form trees, all of each tree at once (step 26): their rows that hold both ways
+        // measured once and corrected together, so that the correction of one joint is made knowing what it does
+        // to every other. (Done joint by joint, step 22 found the opposite: worse, once chains collide.) A
+        // correction is exact to first order, so what it leaves is of the order of the square of what it found:
+        // after errors under a millimetre (or a milliradian) another pass would find almost nothing, and a tree
+        // that had none bigger gets none. (Measured in the chains scene: one pass always left gaps of 6 * 10^-7 m on
+        // average, but a few of a millimetre or two where a joint had been far off; four passes for every tree
+        // cost twice as much, and so did a second for all of them whenever any one needed it.)
+        if (pass == 0) {
+            all.prepare(bodies, joints, 1, settings, /*for_velocity=*/false);
+            taken.assign(joints.size(), 0);
+            error.assign(joints.size(), 0);
+            all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, taken, error);
+            again.clear();
+            for (size_t j = 0; j < joints.size(); ++j)
+                if (taken[j] && error[j] > kTreesSettled) again.push_back(j);
+        } else if (!again.empty()) {
+            sub.clear();
+            for (const size_t j : again) sub.push_back(joints[j]);  // (copies: the pass only moves bodies)
+            all.prepare(bodies, sub, 1, settings, /*for_velocity=*/false);
+            sub_taken.assign(sub.size(), 0);
+            sub_error.assign(sub.size(), 0);
+            all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, sub_taken, sub_error);
+            still.clear();
+            for (size_t i = 0; i < again.size(); ++i)
+                if (sub_taken[i] && sub_error[i] > kTreesSettled) still.push_back(again[i]);
+            again.swap(still);
+        }
+        for (size_t index = 0; index < joints.size(); ++index) {
+            Joint& joint = joints[index];
+            // A joint in a tree is done, but for its one-sided rows (a limit, the cone), which the trees leave.
+            // Those, and every row of the other joints, one ROW at a time, each measured from the poses as they
+            // are right now. A joint's rows share its bodies, so correcting one changes the error of the others:
+            // closing a hinge's point turns the body, which changes its angle, and turning it back to a limit
+            // moves the point. Corrected all together from one measurement they overshoot against each other and
+            // never settle. Each row is measured afresh, and only that row is built. (Not once more after the
+            // last: a joint has the same rows whatever its pose, except that a ball joint's cone row is left out
+            // while the two axes are exactly in line, and a row added that way would have no error to correct.)
+            // The exception is the three rows of an anchor point, corrected together (correct_anchor, above), in
             // the place they have among the joint's rows.
-            const int anchor_rows = joint.type == JointType::Ball || joint.type == JointType::Hinge ? 0 : joint.type == JointType::Weld ? 3 : -1;
+            const bool in_tree = taken[index] != 0;
+            if (in_tree && !((joint.type == JointType::Ball && joint.enable_cone) ||
+                             ((joint.type == JointType::Hinge || joint.type == JointType::Slider) && joint.enable_limit)))
+                continue;
+            const int anchor_rows = in_tree ? -1 : joint.type == JointType::Ball || joint.type == JointType::Hinge ? 0 : joint.type == JointType::Weld ? 3 : -1;
             if (anchor_rows >= 0 && !is_live(bodies, joint)) continue;
             int rows = anchor_rows >= 0 ? anchor_rows + 3 + 1 : 1;  // (until a prepare says how many there are)
             for (int k = 0; k < rows; ++k) {
@@ -435,6 +492,7 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
                 if (solver.rows().empty()) break;
                 JointRow& r = solver.rows_mutable()[0];
                 if (r.error == 0 || r.mass <= 0) continue;
+                if (in_tree && r.lower == -kInf && r.upper == kInf) continue;  // (the tree's)
                 const bool angular_only = r.lin_a.length_sq() == 0 && r.lin_b.length_sq() == 0;
                 const Real limit = angular_only ? kMaxAngularCorrection : kMaxLinearCorrection;
                 const Real C = std::clamp(r.error, -limit, limit);

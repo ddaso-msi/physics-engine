@@ -1217,3 +1217,88 @@ TEST(joints_that_do_not_form_a_tree_are_still_solved_one_row_at_a_time) {
         if (kind == 2) CHECK(again[2].w.z == locked_spin);  // no impulse turned it about its locked axis
     }
 }
+
+// ---- joint trees in the position pass (step 26) ------------------------------------------------------
+
+namespace {
+
+Real worst_gap(const std::vector<Body>& bodies, const std::vector<Joint>& joints) {
+    Real worst = 0;
+    for (const Joint& j : joints) worst = std::max(worst, gap_between(bodies, j));
+    return worst;
+}
+
+// The largest position error left in any rigid row that holds both ways (a slider's anchors may part along its
+// rail; its rows say what it holds).
+Real worst_error(std::vector<Body>& bodies, std::vector<Joint>& joints) {
+    JointSolver solver;
+    solver.prepare(bodies, joints, kDt, SolverSettings{}, /*for_velocity=*/false);
+    Real worst = 0;
+    for (const JointRow& r : solver.rows())
+        if (r.lower == -std::numeric_limits<Real>::infinity() && r.upper == std::numeric_limits<Real>::infinity()) worst = std::max(worst, std::fabs(r.error));
+    return worst;
+}
+
+}  // namespace
+
+TEST(one_position_pass_closes_a_whole_tree) {
+    // A chain of every rigid joint, its links knocked a few millimetres and a few milliradians out of place: the
+    // position pass corrects all of a tree at once, from one measurement, so one pass leaves only what the
+    // turning's curvature adds, micrometres. (One joint at a time it left a tenth of the gaps: each joint's
+    // correction opened its neighbours.)
+    Lcg rng;
+    std::vector<Body> bodies;
+    std::vector<Joint> joints;
+    make_chain(bodies, joints, 12, true, rng);
+    for (Body& b : bodies) {
+        b.pos += rng.in_box(0.004f);
+        b.q = (Quat::from_axis_angle(Vec3{rng.range(-1, 1), rng.range(-1, 1), 1}.normalized(), rng.range(-0.004f, 0.004f)) * b.q).normalized();
+    }
+    const Real before = worst_error(bodies, joints);
+    SolverSettings once;
+    once.joint_position_iterations = 1;
+    solve_joint_positions(bodies, joints, once);
+    CHECK(before > 5e-3f);
+    CHECK(worst_error(bodies, joints) < 5e-5f);  // (measured: 1.2 * 10^-5)
+}
+
+TEST(a_tree_knocked_far_out_of_place_gets_more_passes) {
+    // Knocked by centimetres, one correction leaves what the curvature adds, a millimetre or so; a tree whose
+    // errors were that large is corrected again in the next pass (and only such a tree), until they are not.
+    Lcg rng;
+    std::vector<Body> bodies;
+    std::vector<Joint> joints;
+    make_chain(bodies, joints, 8, true, rng);
+    for (Body& b : bodies) b.pos += rng.in_box(0.05f);
+    SolverSettings once, four;
+    once.joint_position_iterations = 1;
+    four.joint_position_iterations = 4;
+    std::vector<Body> again = bodies;
+    solve_joint_positions(bodies, joints, once);
+    solve_joint_positions(again, joints, four);
+    CHECK(worst_error(bodies, joints) > 1e-4f);  // one pass is not enough for this
+    CHECK(worst_error(again, joints) < 1e-5f);
+}
+
+TEST(joints_in_a_loop_are_still_corrected_one_row_at_a_time) {
+    // A ring of four bodies joined in a loop is no tree: its joints are corrected as before, row by row, which
+    // closes a loop slowly (each joint's correction opens its neighbours) but surely.
+    std::vector<Body> bodies;
+    std::vector<Joint> joints;
+    for (int i = 0; i < 4; ++i) {
+        const Real angle = kPi / 2 * static_cast<Real>(i);
+        bodies.push_back(Body::solid_box({0.2f, 0.08f, 0.1f}, 1, {std::cos(angle), std::sin(angle), 0}));
+    }
+    for (int i = 0; i < 4; ++i)
+        joints.push_back(Joint::ball(bodies, i, (i + 1) % 4, (bodies[static_cast<size_t>(i)].pos + bodies[static_cast<size_t>((i + 1) % 4)].pos) * 0.5f));
+    bodies[1].pos += Vec3{0.01f, 0.02f, -0.01f};
+    SolverSettings five;
+    five.joint_position_iterations = 5;
+    Real gap = worst_gap(bodies, joints);
+    for (int round = 0; round < 4; ++round) {
+        solve_joint_positions(bodies, joints, five);
+        const Real now = worst_gap(bodies, joints);
+        CHECK(now < gap * 0.8f);  // (measured: 2.4 cm, then 10, 7.7, 5.7 and 4.2 mm)
+        gap = now;
+    }
+}

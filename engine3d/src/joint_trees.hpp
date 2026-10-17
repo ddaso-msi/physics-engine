@@ -33,10 +33,19 @@ class JointTrees {
 public:
     // Finds the trees among `rows` (built for the velocity pass; a joint's rows are rows[first[k] ..
     // first[k + 1]), the last entry being rows.size()) and factors them for the bodies' present poses.
-    void build(const std::vector<Body>& bodies, const std::vector<JointRow>& rows, const std::vector<int>& first);
+    // If `taken` is given it receives, for each joint k, whether its rows were taken into a tree.
+    void build(const std::vector<Body>& bodies, const std::vector<JointRow>& rows, const std::vector<int>& first,
+               std::vector<std::uint8_t>* taken = nullptr);
     // One exact solve of the tree rows from the bodies' current velocities: changes the velocities and adds to
     // the rows' accumulated impulses.
-    void solve(std::vector<JointRow>& rows);
+    void solve(std::vector<JointRow>& rows) { pass(rows, false, 0, 0, nullptr); }
+    // The same solve for the rows' position errors (rows built for the position pass), each limited to the
+    // most a row may correct at once: moves and turns the bodies so as to remove them, to first order.
+    // `largest[k]` receives, for each joint k taken into a tree, the largest error any row of its tree had
+    // (metres or radians).
+    void correct(std::vector<JointRow>& rows, Real max_linear, Real max_angular, std::vector<Real>& largest) {
+        pass(rows, true, max_linear, max_angular, &largest);
+    }
 
 private:
     // (The arrays are left uninitialised, by the empty constructors: each node is a kilobyte, and clearing two
@@ -47,6 +56,7 @@ private:
         int parent;        // node index; -1 for a tree's root
         Body* body;        // a body node's body; null for a joint
         int rows[6];       // a joint node's rows
+        int joint;         // a joint node's joint (its index k in `first`)
         double Dinv[6][6];  // the inverse of this node's diagonal block once its children are eliminated
         double T[6][6];     // Dinv times the block coupling this node to its parent (size x parent's size)
     };
@@ -58,6 +68,8 @@ private:
         int vec;                        // where y and x (size each) start in vec_
         Body* body;                     // null for a joint
         int rows[6];
+        int tree;                       // which tree it is in
+        int joint;                      // a joint's index k in `first`; -1 for a body
     };
     // Only while building: a joint node's body nodes, and its rows as they act on each (row, then linear and
     // angular), from which the blocks coupling it to its neighbours are taken.
@@ -67,6 +79,7 @@ private:
         double J[2][6][6];
     };
     int add_node(int size, Body* body);  // returns its index
+    void pass(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular, std::vector<Real>* largest);
     // The block coupling child c to its parent: H[c][parent], size(c) x size(parent).
     void child_block(int c, double out[6][6]) const;
 
@@ -74,6 +87,8 @@ private:
     std::vector<Links> links_;  // per node (unused for a body)
     int used_ = 0;
     std::vector<Step> steps_, sorted_;  // every tree, packed for solving, and ordered by height (see build)
+    int trees_ = 0;
+    std::vector<Real> tree_error_;
     std::vector<float> data_, vec_;
     std::vector<int> body_node_, adjacency_, adjacent_start_, piece_, post_, step_of_;
     std::vector<std::uint8_t> seen_;

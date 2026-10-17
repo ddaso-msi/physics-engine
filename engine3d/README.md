@@ -1211,6 +1211,54 @@ breakages: 10; caught: the shared colour never solved, or solved in fours; frict
 missing points not cleared (caught once the automatic clearing went); the warm start, or the kept impulses, dropped; b
 pushed with a's inverse mass; b's spin not written back. Not caught: contacts not grouped by point count (time only).
 
+## Step 25: a compact array of velocities (measured, not built)
+
+After step 24 the contact solver's largest remaining cost is moving velocities between the bodies and the lanes: each
+four contacts read and write eight bodies' velocity and spin, out of 232-byte bodies. Engines often solve on a compact
+array of just those (32 bytes a body), copied in before the solve and out after. Doing that properly here means the
+joint solver and the joint trees moving to the array too, so first an experiment on contacts alone (exact for scenes
+without joints): it made the whole contact solve 5 to 9% faster (1000 crates: 0.40 to 0.38 ms), about 2% of a step.
+What remains is the shuffling into lanes itself, which an array does not remove. Not worth two homes for every
+velocity; not built.
+
+## Step 26: joint trees in the position pass
+
+Step 23 solved joint trees exactly for velocities; the position pass still corrected them a joint at a time. Step 22
+had found that correcting a joint's rows together, joint by joint, made colliding chains worse. A whole tree at once is
+different: each joint's correction is made knowing what it does to all the others. Now each pass first measures every
+rigid two-way row of every tree (one `prepare` of all the joints), solves the same tree system as step 23 with the
+errors on the right (each limited as a row's own correction would be), and moves and turns the bodies by the result.
+Then, as before, one row at a time: the rows of joints in no tree, and the one-sided rows (limits, the cone) of joints
+in one.
+
+A tree correction is exact to first order; what it leaves is about the square of what it found, so a second pass finds
+little unless the first found a lot. Measured in the chains scene: one tree pass always left gaps of 6 * 10^-7 m on
+average but a few of 1 to 3 mm where a joint had been far off; four passes for every tree cost twice as much, and so did
+a second pass for all of them whenever any needed one. So a tree gets another pass only if its own largest error was
+over a millimetre (or a milliradian), and only those trees are measured again.
+
+Seven seconds of chains striking each other, 1000 links:
+
+| | step 24, mean / worst gap | step 26 |
+|---|---|---|
+| ball chains | 0.11 mm / 1.6 mm | 0.6 / 4.8 micrometres |
+| hinge chains | 0.11 / 2.0 mm | 0.6 / 11 micrometres |
+| welded cantilevers | 0.05 / 2.5 mm | 0.03 / 1.4 micrometres |
+| welded rods hung from a ball joint | 0.10 / 4.7 mm | 0.5 / 3.9 micrometres |
+
+It costs the chains benchmark 0.2 ms a step at 1000 links (movement 0.33 to 0.55 ms; step 1.26 to 1.51), measured on a
+busy machine; scenes without joints are unchanged. (A ring of joints, a loop, is still corrected row by row, and closes
+as slowly as before: a 2.4 cm gap is 4 mm after twenty passes.)
+
+Tests (3, 282 in total): one pass corrects a twelve-link chain of every rigid joint, knocked 4 mm and 4 mrad out, to
+10^-5 (row by row it left a tenth of the error); a chain knocked 5 cm out needs more than one pass and gets them; a ring
+is still corrected, a little more each pass. Two first versions of these were wrong, not the code: a slider's anchors
+may part along its rail, so the tests measure the rows' errors, not the anchors' gap. Deliberate breakages: 8; caught:
+no tree correction, no second pass, tree joints' limits and cones left alone, errors not limited, bodies turned the
+wrong way or not at all. Not caught: every tree given every pass, and tree joints' two-way rows corrected again row by
+row on the way to their limits (both time only). An index one past the end, found by the chains measurement crashing,
+not by a test (the tests passed over it), is fixed; the sanitizer build, which would have caught it, was run after.
+
 ## Planned next
 
 To be decided.

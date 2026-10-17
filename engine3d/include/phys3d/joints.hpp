@@ -146,6 +146,12 @@ public:
     // exactly (step 23). The contact solver asks for that in its last sweep.
     void solve_velocity(bool exactly = true);
     void store();          // saves the accumulated impulses back into the joints
+    // Position pass (rows built with for_velocity false): corrects the rows of joints that form trees, all of a
+    // tree at once (step 26), each error limited to `max_linear` or `max_angular`. `taken[j]` is set for each
+    // joint j (an index into the span prepare() was given) whose rows that hold both ways were corrected, and
+    // `error[j]` to the largest error of that joint's tree (metres or radians).
+    void correct_trees(std::vector<Body>& bodies, Real max_linear, Real max_angular, std::vector<std::uint8_t>& taken,
+                       std::vector<Real>& error);
 
     const std::vector<JointRow>& rows() const { return rows_; }
     std::vector<JointRow>& rows_mutable() { return rows_; }
@@ -160,6 +166,7 @@ private:
     JointRow skipped_;  // where the rows not asked for go
     std::unique_ptr<JointTrees> trees_;
     std::vector<int> first_row_;  // where each joint's rows begin (and, last, where the rows end)
+    std::vector<int> joint_of_;   // which joint (index into the span) each of those is
 };
 
 // Position correction, run after the bodies have moved: shifts positions and orientations directly to
