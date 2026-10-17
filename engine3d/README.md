@@ -1259,6 +1259,57 @@ wrong way or not at all. Not caught: every tree given every pass, and tree joint
 row on the way to their limits (both time only). An index one past the end, found by the chains measurement crashing,
 not by a test (the tests passed over it), is fixed; the sanitizer build, which would have caught it, was run after.
 
+## Step 27: loops of joints
+
+Steps 23 and 26 solve joints exactly when they form a tree. A loop (a ring of joints, or anything fixed to the world in
+two places, a rope bridge, which is a loop through the world) was still corrected a row at a time, and slowly: a ring
+opened 2.4 cm took twenty position passes to get to 4 mm, and a 40-plank rope bridge swung with its joints open by 1.6
+mm on average and 9 mm at worst.
+
+Each loop is now cut at one joint and the cut put back exactly through the tree. Which joint: the joints are taken in
+turn, each joining two sets of bodies (the world one more body); one that would join a set to itself closes a loop and
+is cut. Joints between two moving bodies are taken before joints to the world, so that a structure fixed at both ends
+is one tree fixed at one end and cut at the other (taken in any order, both ends could be fixed first and the cut fall
+in the middle, between two trees, where neither can carry it). Putting the cut back: an impulse on the cut rows moves
+the tree's bodies by A lambda, A found once per step by one tree solve per cut row with that row's unit impulse on the
+right (and nothing asked of the tree's own rows, so they still hold); the cut rows' speeds then change by W lambda,
+W = J_cut A. After each tree solve, lambda = W^-1 (what the cut rows still need), and A lambda is applied: for the
+velocities in the last sweep, for the positions in every pass (less, there, what the tree's own correction already did
+to them, to first order). A tree with more than 24 cut rows is left to sweeping.
+
+W can be singular, and the first test found one: a straight bridge cannot be pulled along its length, so its cut row
+along the bridge is implied by the others. The Cholesky factoring of W now drops such a row (it gets no impulse) and
+solves the rest exactly. A joint given twice is the same case, every row of the second dropped.
+
+| | step 26, mean / worst gap | step 27 |
+|---|---|---|
+| rope bridge, 12 planks | 0.24 / 2.0 mm | 1.1 / 5.7 micrometres |
+| rope bridge, 40 planks | 1.6 / 9.0 mm | 1.2 / 5.7 micrometres |
+| ring, one position pass from 2.4 cm open | (twenty passes: 4 mm) | 0.05 mm; two passes: 10^-7 m |
+
+For a few hundredths of a millisecond. The chains benchmark, which has no loops, is unchanged within the noise of a busy
+machine.
+
+**A bookkeeping fault this found, in step 23.** A new test checks that each row's kept impulse is what it really did: from
+a cold start, one sweep, then every body's velocity must be its start plus M^-1 J^T lambda over all the rows' impulses.
+For a chain it was off by 4 * 10^-4: the trees' answer has a part for the bodies and a part for the rows, and step 23
+took the bodies' velocities from the first and the impulses from the second, which agree only to single precision
+(a few parts in ten thousand over light links). The velocity solves now give each row's impulse to its bodies through
+the row itself, as Gauss-Seidel does, so velocities and kept impulses agree by construction, and momentum is kept exactly;
+and the solves are done in double precision, without which the rows were then off instead (a chain solved "exactly" in one
+sweep was 10^-4 out). About 0.03 ms more per exact solve at a thousand joints.
+
+Tests (4 new, 2 rewritten, 286 in total): a ring and a bridge held at both ends are solved exactly in one sweep (the body
+that cannot turn is still swept); a ring opened 2.4 cm is closed by one position pass to 0.2 mm and by two to a micrometre;
+a rope bridge started as a V with slack sags and holds together within 0.1 mm; a resting rope bridge's two ends carry its
+weight between them; the impulses kept are the impulses applied, for a tree, a ring and a bridge; and a joint given twice
+is no trouble. (The first rope bridge was built straight and taut, which no chain can hold up: under its own weight its
+tension is unbounded. That was the test.) Deliberate breakages: 12; caught: cuts never put back, fixed joints not taken
+last, every row dropped, the cut's impulse pushed the wrong way, the tree's own correction not counted in the position
+pass, the cut rows' impulses or the tree rows' changes not applied, an impulse kept without its velocity or the other way
+round. Not caught: no row ever dropped (only an exactly singular row was met, which a pivot of exactly zero drops anyway;
+the threshold is not pinned by a test), and cut joints not marked as done (time only).
+
 ## Planned next
 
 To be decided.

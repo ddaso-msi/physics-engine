@@ -18,10 +18,17 @@
 // diagonal block. So the factoring costs a few 6 x 6 products per body and joint, and so does each solve.
 //
 // Only the rows that hold both ways, rigidly (anchors, hinge and weld axes, slider rails) are solved here. Limits,
-// motors, the cone and springs are inequalities or soft, and are left to Gauss-Seidel; so are joints that are
-// not part of a tree (a loop, or a structure fixed to the world in two places, which is a loop through the
-// world), and joints of a body that cannot turn about some axis (its mass matrix has no inverse). Gauss-Seidel
-// sweeps every row, in the trees too; the trees' exact solve comes at the end of the last sweep.
+// motors, the cone and springs are inequalities or soft, and are left to Gauss-Seidel; so are joints of a body that
+// cannot turn about some axis (its mass matrix has no inverse). Gauss-Seidel sweeps every row, in the trees too; the
+// trees' exact solve comes at the end of the last sweep.
+//
+// Loops (step 27): a ring of joints, or a structure fixed to the world in two places (a loop through the world), is
+// not a tree. Each loop is cut at one joint, chosen as the joints are taken in turn: a joint that would join two
+// bodies already joined (or a body to the world when it already is) is a cut joint, and the rest are trees. The cut
+// joints' rows are then put back exactly, through the tree: an impulse lambda on them moves the tree's bodies by
+// A lambda, A found by one tree solve per cut row with that row's impulse on the right (so the tree's own rows still
+// hold), and the cut rows' speeds by W lambda, W = J_cut A. After each tree solve, lambda = W^-1 (what the cut rows
+// still need), and A lambda is applied. A tree with more than kMaxCutRows of them is left to Gauss-Seidel.
 #include <phys3d/joints.hpp>
 
 #include <cstdint>
@@ -31,6 +38,11 @@ namespace phys3d {
 
 class JointTrees {
 public:
+    // The numbers the solves work with. Double: in single precision the answer's body part and its impulses part
+    // disagreed by a few parts in ten thousand over a chain of light links, and either way something was off: the
+    // velocities with the impulses kept, or the rows with exactness.
+    using Scalar = double;
+
     // Finds the trees among `rows` (built for the velocity pass; a joint's rows are rows[first[k] ..
     // first[k + 1]), the last entry being rows.size()) and factors them for the bodies' present poses.
     // If `taken` is given it receives, for each joint k, whether its rows were taken into a tree.
@@ -60,8 +72,8 @@ private:
         double Dinv[6][6];  // the inverse of this node's diagonal block once its children are eliminated
         double T[6][6];     // Dinv times the block coupling this node to its parent (size x parent's size)
     };
-    // What a solve needs of a node, packed: its blocks in single precision, only as large as they are, one node
-    // after another in elimination order. (The factoring is done in double precision.)
+    // What a solve needs of a node, packed: its blocks, only as large as they are, one node after another in
+    // elimination order.
     struct Step {
         int size, parent, parent_size;  // parent: index of the parent's Step, -1 for a root
         int data;                       // where Dinv (size x size) and then T (size x parent_size) start in data_
@@ -78,6 +90,25 @@ private:
         int node[2];  // -1: held to the world or a fixed body
         double J[2][6][6];
     };
+    // A joint that would close a loop: its two-way rows, and its bodies (index into the bodies; -1 for fixed).
+    struct Cut {
+        int joint, size, rows[6], body[2];
+    };
+    // A tree's cut rows, put back through it (see above).
+    static constexpr int kMaxCutRows = 24;
+    struct Loop {
+        int tree = 0, size = 0;
+        int rows[kMaxCutRows];
+        int joint[kMaxCutRows];    // the joint (index k in `first`) each row belongs to
+        int step[kMaxCutRows][2];  // the Step of each row's bodies, -1 for a fixed one
+        Scalar J[kMaxCutRows][2][6];
+        size_t response = 0;  // where A starts in response_: column by column, each the tree's x in its step order
+        size_t length = 0;    // floats in one column
+        std::vector<double> L;  // W = L L^T, over the rows not dropped
+        std::uint8_t dropped[kMaxCutRows];  // rows the others (with the tree) already imply: given no impulse
+    };
+    void solve_tree(int tree);  // one solve of a single tree, from the y already in vec_, leaving x there
+    void close_loops(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular);
     int add_node(int size, Body* body);  // returns its index
     void pass(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular, std::vector<Real>* largest);
     // The block coupling child c to its parent: H[c][parent], size(c) x size(parent).
@@ -89,7 +120,11 @@ private:
     std::vector<Step> steps_, sorted_;  // every tree, packed for solving, and ordered by height (see build)
     int trees_ = 0;
     std::vector<Real> tree_error_;
-    std::vector<float> data_, vec_;
+    std::vector<int> union_, tree_start_, tree_steps_, body_step_;  // tree_steps_[tree_start_[t] ..]: tree t's steps, in order
+    std::vector<Cut> cuts_;
+    std::vector<Loop> loops_;
+    std::vector<Scalar> response_;
+    std::vector<Scalar> data_, vec_;
     std::vector<int> body_node_, adjacency_, adjacent_start_, piece_, post_, step_of_;
     std::vector<std::uint8_t> seen_;
     std::vector<std::pair<int, std::size_t>> walk_;

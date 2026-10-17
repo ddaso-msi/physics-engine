@@ -80,6 +80,21 @@ constexpr std::array<std::array<Eliminate, 7>, 7> kEliminate = {
     eliminations<4>(std::make_integer_sequence<int, 7>{}), eliminations<5>(std::make_integer_sequence<int, 7>{}),
     eliminations<6>(std::make_integer_sequence<int, 7>{})};
 
+// Three of the solve's numbers as a vector of the engine's.
+Vec3 as_vec3(const JointTrees::Scalar* p) { return {static_cast<Real>(p[0]), static_cast<Real>(p[1]), static_cast<Real>(p[2])}; }
+
+// An impulse along a row: kept in the row, and given to its bodies as M^-1 J^T lambda. (The velocity solves apply
+// the trees' answer this way, from the rows' impulses, not from the bodies' own part of it: the two agree only to
+// single precision, which over a chain of light links was a few parts in ten thousand, and what is kept for the
+// warm start must be what was applied. This way momentum is kept exactly, too.)
+void apply_impulse(JointRow& r, Real lambda) {
+    r.impulse += lambda;
+    r.a->vel += r.lin_a * (r.a->inv_mass * lambda);
+    r.a->w += r.inv_i_ang_a * lambda;
+    r.b->vel += r.lin_b * (r.b->inv_mass * lambda);
+    r.b->w += r.inv_i_ang_b * lambda;
+}
+
 // A rigid row that holds both ways: what the trees solve.
 bool two_way(const JointRow& r) { return r.lower == -kInf && r.upper == kInf && r.softness == 0 && r.mass > 0; }
 
@@ -133,8 +148,22 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
         return b.inv_mass > 0 && b.inv_inertia_body.cx.x > 0 && b.inv_inertia_body.cy.y > 0 && b.inv_inertia_body.cz.z > 0;
     };
 
-    // The nodes: one per joint with two-way rows, one per moving body they hold.
+    // The nodes: one per joint with two-way rows, one per moving body they hold; except a joint that would close a
+    // loop, which is set aside as a cut. Taken in turn, a joint joins two sets of bodies (the world being one more
+    // body, so that everything fixed to it is one set); if they are already one, it closes a loop. Joints between
+    // two moving bodies are taken first, and joints to the world or a fixed body after: so a structure fixed at both
+    // ends is one tree fixed at one, cut at the other (taken in any order, both ends could be fixed first, and the
+    // cut would fall in the middle, between two trees, where it cannot be put back through either).
     body_node_.assign(bodies.size(), -1);
+    const int world = static_cast<int>(bodies.size());
+    union_.resize(bodies.size() + 1);
+    for (size_t i = 0; i < union_.size(); ++i) union_[i] = static_cast<int>(i);
+    auto find = [&](int i) {
+        while (union_[static_cast<size_t>(i)] != i) i = union_[static_cast<size_t>(i)] = union_[static_cast<size_t>(union_[static_cast<size_t>(i)])];
+        return i;
+    };
+    cuts_.clear();
+    for (int fixed_side = 0; fixed_side < 2; ++fixed_side)
     for (size_t k = 0; k + 1 < first.size(); ++k) {
         int chosen[6], m = 0;
         for (int r = first[k]; r < first[k + 1]; ++r)
@@ -142,9 +171,21 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
         if (m == 0) continue;
         const JointRow& r0 = rows[static_cast<size_t>(first[k])];
         const int side[2] = {body_index(r0.a), body_index(r0.b)};
+        if ((side[0] < 0 || side[1] < 0) != (fixed_side == 1)) continue;  // (this joint's turn is the other round)
         bool ok = side[0] >= 0 || side[1] >= 0;
         for (int s = 0; s < 2; ++s) ok = ok && (side[s] < 0 || usable(bodies[static_cast<size_t>(side[s])]));
         if (!ok) continue;
+        const int set_a = find(side[0] < 0 ? world : side[0]), set_b = find(side[1] < 0 ? world : side[1]);
+        if (set_a == set_b) {
+            Cut cut;
+            cut.joint = static_cast<int>(k);
+            cut.size = m;
+            std::copy(chosen, chosen + m, cut.rows);
+            cut.body[0] = side[0], cut.body[1] = side[1];
+            cuts_.push_back(cut);
+            continue;
+        }
+        union_[static_cast<size_t>(set_a)] = set_b;
         const int me = add_node(m, nullptr);
         std::copy(chosen, chosen + m, nodes_[static_cast<size_t>(me)].rows);
         nodes_[static_cast<size_t>(me)].joint = static_cast<int>(k);
@@ -214,7 +255,7 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
             edges += static_cast<size_t>(links);
             if (links == 1) held = i;
         }
-        if (edges + 1 != piece.size()) continue;  // a loop: left to Gauss-Seidel
+        if (edges + 1 != piece.size()) continue;  // (cannot happen: loops were cut above)
 
         // Leaves first: a depth-first walk from the root, each node listed after everything below it.
         const int root = held >= 0 ? held : a_body;
@@ -285,9 +326,9 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
             st.tree = trees_ - 1;  // (counted above)
             st.joint = node.body ? -1 : node.joint;
             for (int a = 0; a < st.size; ++a)
-                for (int b = 0; b < st.size; ++b) data_.push_back(static_cast<float>(node.Dinv[a][b]));
+                for (int b = 0; b < st.size; ++b) data_.push_back(node.Dinv[a][b]);
             for (int a = 0; a < st.size; ++a)
-                for (int b = 0; b < st.parent_size; ++b) data_.push_back(static_cast<float>(node.T[a][b]));
+                for (int b = 0; b < st.parent_size; ++b) data_.push_back(node.T[a][b]);
             steps_.push_back(st);
         }
     }
@@ -316,6 +357,131 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
     int at = 0;
     for (Step& st : steps_) st.vec = at, at += 2 * st.size;
     vec_.assign(static_cast<size_t>(at), 0.0f);
+
+    // Each tree's own steps, in the same order, and which step each body is.
+    tree_start_.assign(static_cast<size_t>(trees_) + 1, 0);
+    for (const Step& st : steps_) ++tree_start_[static_cast<size_t>(st.tree) + 1];
+    for (int t = 0; t < trees_; ++t) tree_start_[static_cast<size_t>(t) + 1] += tree_start_[static_cast<size_t>(t)];
+    tree_steps_.resize(steps_.size());
+    std::vector<int>& cursor = piece_;  // (borrowed)
+    cursor.assign(tree_start_.begin(), tree_start_.end() - 1);
+    body_step_.assign(bodies.size(), -1);
+    for (size_t k = 0; k < steps_.size(); ++k) {
+        tree_steps_[static_cast<size_t>(cursor[static_cast<size_t>(steps_[k].tree)]++)] = static_cast<int>(k);
+        if (steps_[k].body) body_step_[static_cast<size_t>(steps_[k].body - base)] = static_cast<int>(k);
+    }
+
+    // The loops: each tree's cut rows, and how its bodies answer an impulse on each.
+    loops_.clear();
+    response_.clear();
+    std::vector<int>& loop_of = post_;  // (borrowed: per tree, its loop, -1 for none, -2 for too many cut rows)
+    loop_of.assign(static_cast<size_t>(trees_), -1);
+    for (const Cut& cut : cuts_) {
+        int step[2] = {-1, -1}, tree = -1;
+        bool ok = true;
+        for (int s = 0; s < 2; ++s) {
+            if (cut.body[s] < 0) continue;
+            step[s] = body_step_[static_cast<size_t>(cut.body[s])];
+            if (step[s] < 0) ok = false;  // (its tree could not be factored)
+            else if (tree < 0) tree = steps_[static_cast<size_t>(step[s])].tree;
+            else if (steps_[static_cast<size_t>(step[s])].tree != tree) ok = false;  // (a loop through the world joining two trees)
+        }
+        if (!ok || tree < 0) continue;
+        int& l = loop_of[static_cast<size_t>(tree)];
+        if (l == -2) continue;
+        if (l == -1) {
+            l = static_cast<int>(loops_.size());
+            loops_.emplace_back();
+            loops_.back().tree = tree;
+        }
+        Loop& loop = loops_[static_cast<size_t>(l)];
+        if (loop.size + cut.size > kMaxCutRows) {
+            loop.size = 0;  // (left, all of it, to Gauss-Seidel)
+            l = -2;
+            continue;
+        }
+        for (int i = 0; i < cut.size; ++i) {
+            const JointRow& r = rows[static_cast<size_t>(cut.rows[i])];
+            const int at_row = loop.size++;
+            loop.rows[at_row] = cut.rows[i];
+            loop.joint[at_row] = cut.joint;
+            for (int s = 0; s < 2; ++s) {
+                loop.step[at_row][s] = step[s];
+                const Vec3 lin = s == 0 ? r.lin_a : r.lin_b, ang = s == 0 ? r.ang_a : r.ang_b;
+                const Scalar j[6] = {lin.x, lin.y, lin.z, ang.x, ang.y, ang.z};
+                std::copy(j, j + 6, loop.J[at_row][s]);
+            }
+        }
+    }
+    for (Loop& loop : loops_) {
+        if (loop.size == 0) continue;
+        const int first_step = tree_start_[static_cast<size_t>(loop.tree)], end_step = tree_start_[static_cast<size_t>(loop.tree) + 1];
+        loop.length = 0;
+        for (int k = first_step; k < end_step; ++k) loop.length += static_cast<size_t>(steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])].size);
+        loop.response = response_.size();
+        response_.resize(response_.size() + loop.length * static_cast<size_t>(loop.size));
+        // Column j: the tree solved with cut row j's unit impulse on its bodies (and nothing asked of the tree's
+        // own rows): how every node of the tree answers it.
+        for (int j = 0; j < loop.size; ++j) {
+            for (int k = first_step; k < end_step; ++k) {
+                const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+                std::fill(vec_.begin() + st.vec, vec_.begin() + st.vec + st.size, 0.0f);
+            }
+            for (int s = 0; s < 2; ++s)
+                if (loop.step[j][s] >= 0)
+                    for (int d = 0; d < 6; ++d) vec_[static_cast<size_t>(steps_[static_cast<size_t>(loop.step[j][s])].vec + d)] += loop.J[j][s][d];
+            solve_tree(loop.tree);
+            Scalar* column = response_.data() + loop.response + loop.length * static_cast<size_t>(j);
+            for (int k = first_step; k < end_step; ++k) {
+                const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+                column = std::copy(vec_.begin() + st.vec + st.size, vec_.begin() + st.vec + 2 * st.size, column);
+            }
+        }
+        // W = J_cut A, and its Cholesky factor. (Its entries: row i of the cut rows, against the bodies' answer to
+        // column j, read back from the column at the place of the body's step.)
+        std::vector<int>& start_of = step_of_;  // (borrowed: where each of the tree's steps starts in a column)
+        start_of.assign(steps_.size(), 0);
+        for (int k = first_step, offset = 0; k < end_step; ++k) {
+            start_of[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])] = offset;
+            offset += steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])].size;
+        }
+        const int count = loop.size;
+        loop.L.assign(static_cast<size_t>(count * count), 0.0);
+        std::vector<double> W(static_cast<size_t>(count * count));
+        for (int j = 0; j < count; ++j) {
+            const Scalar* column = response_.data() + loop.response + loop.length * static_cast<size_t>(j);
+            for (int i = 0; i < count; ++i) {
+                double sum = 0;
+                for (int s = 0; s < 2; ++s)
+                    if (loop.step[i][s] >= 0)
+                        for (int d = 0; d < 6; ++d) sum += static_cast<double>(loop.J[i][s][d]) * column[start_of[static_cast<size_t>(loop.step[i][s])] + d];
+                W[static_cast<size_t>(i * count + j)] = sum;
+            }
+        }
+        // Cholesky, dropping any row whose pivot vanishes: that row is implied, to first order, by the rows before it
+        // and the tree's (a straight chain fixed at both ends cannot be pulled along its length: its cut row along
+        // the chain is then such a row), and it is given no impulse. The others are still solved exactly.
+        double scale = 0;
+        for (int i = 0; i < count; ++i) scale = std::max(scale, W[static_cast<size_t>(i * count + i)]);
+        for (int c = 0; c < count; ++c) {
+            double d = W[static_cast<size_t>(c * count + c)];
+            for (int k = 0; k < c; ++k) d -= loop.L[static_cast<size_t>(c * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
+            loop.dropped[c] = !(d > 1e-6 * scale);
+            if (loop.dropped[c]) {
+                loop.L[static_cast<size_t>(c * count + c)] = 1;
+                continue;  // (its column below stays zero)
+            }
+            loop.L[static_cast<size_t>(c * count + c)] = std::sqrt(d);
+            for (int i = c + 1; i < count; ++i) {
+                double e = 0.5 * (W[static_cast<size_t>(i * count + c)] + W[static_cast<size_t>(c * count + i)]);
+                for (int k = 0; k < c; ++k) e -= loop.L[static_cast<size_t>(i * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
+                loop.L[static_cast<size_t>(i * count + c)] = e / loop.L[static_cast<size_t>(c * count + c)];
+            }
+        }
+    }
+    if (taken)
+        for (const Loop& loop : loops_)
+            for (int i = 0; i < loop.size; ++i) (*taken)[static_cast<size_t>(loop.joint[i])] = 1;
 }
 
 namespace {
@@ -323,30 +489,32 @@ namespace {
 // The two halves of a solve for one node, with its size N and its parent's size P fixed at compile time, so that
 // the small products are unrolled (there are only a few dozen combinations; see kernels below).
 template <int N, int P>
-void down(const float* Dinv, const float* y, float* x, float* parent_y) {
+void down(const JointTrees::Scalar* Dinv, const JointTrees::Scalar* y, JointTrees::Scalar* x, JointTrees::Scalar* parent_y) {
+    using Scalar = JointTrees::Scalar;
     for (int i = 0; i < N; ++i) {
-        float z = 0;
+        Scalar z = 0;
         for (int k = 0; k < N; ++k) z += Dinv[i * N + k] * y[k];
         x[i] = z;
     }
-    const float* T = Dinv + N * N;
+    const Scalar* T = Dinv + N * N;
     for (int j = 0; j < P; ++j) {
-        float sum = 0;
+        Scalar sum = 0;
         for (int k = 0; k < N; ++k) sum += T[k * P + j] * y[k];
         parent_y[j] -= sum;
     }
 }
 template <int N, int P>
-void up(const float* Dinv, const float* parent_x, float* x) {
-    const float* T = Dinv + N * N;
+void up(const JointTrees::Scalar* Dinv, const JointTrees::Scalar* parent_x, JointTrees::Scalar* x) {
+    using Scalar = JointTrees::Scalar;
+    const Scalar* T = Dinv + N * N;
     for (int i = 0; i < N; ++i) {
-        float sum = 0;
+        Scalar sum = 0;
         for (int j = 0; j < P; ++j) sum += T[i * P + j] * parent_x[j];
         x[i] -= sum;
     }
 }
-using Down = void (*)(const float*, const float*, float*, float*);
-using Up = void (*)(const float*, const float*, float*);
+using Down = void (*)(const JointTrees::Scalar*, const JointTrees::Scalar*, JointTrees::Scalar*, JointTrees::Scalar*);
+using Up = void (*)(const JointTrees::Scalar*, const JointTrees::Scalar*, JointTrees::Scalar*);
 template <int N, int... P>
 constexpr std::array<Down, 7> downs(std::integer_sequence<int, P...>) { return {down<N, P>...}; }
 template <int N, int... P>
@@ -360,13 +528,90 @@ constexpr std::array<std::array<Up, 7>, 7> kUp = {ups<1>(Sizes{}), ups<1>(Sizes{
 
 }  // namespace
 
+void JointTrees::solve_tree(int tree) {
+    Scalar* v = vec_.data();
+    Scalar none[6];
+    const int first_step = tree_start_[static_cast<size_t>(tree)], end_step = tree_start_[static_cast<size_t>(tree) + 1];
+    for (int k = first_step; k < end_step; ++k) {
+        const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+        kDown[static_cast<size_t>(st.size)][static_cast<size_t>(st.parent_size)](
+            data_.data() + st.data, v + st.vec, v + st.vec + st.size, st.parent < 0 ? none : v + steps_[static_cast<size_t>(st.parent)].vec);
+    }
+    for (int k = end_step - 1; k >= first_step; --k) {
+        const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+        if (st.parent < 0) continue;
+        const Step& parent = steps_[static_cast<size_t>(st.parent)];
+        kUp[static_cast<size_t>(st.size)][static_cast<size_t>(st.parent_size)](data_.data() + st.data, v + parent.vec + parent.size, v + st.vec + st.size);
+    }
+}
+
+void JointTrees::close_loops(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular) {
+    for (const Loop& loop : loops_) {
+        const int n = loop.size;
+        if (n == 0) continue;
+        // What the cut rows still need, after the tree's own correction: for velocities, measured from the bodies
+        // (already moved); for positions, their errors less what the tree's correction (still in x) did to them.
+        double lambda[kMaxCutRows];
+        for (int i = 0; i < n; ++i) {
+            const JointRow& row = rows[static_cast<size_t>(loop.rows[i])];
+            if (positions) {
+                const Real limit = row.lin_a.length_sq() == 0 && row.lin_b.length_sq() == 0 ? max_angular : max_linear;
+                double need = -static_cast<double>(std::clamp(row.error, -limit, limit));
+                for (int s = 0; s < 2; ++s)
+                    if (loop.step[i][s] >= 0) {
+                        const Step& st = steps_[static_cast<size_t>(loop.step[i][s])];
+                        for (int d = 0; d < 6; ++d) need -= static_cast<double>(loop.J[i][s][d]) * vec_[static_cast<size_t>(st.vec + 6 + d)];
+                    }
+                lambda[i] = need;
+                Real& worst = tree_error_[static_cast<size_t>(loop.tree)];
+                worst = std::max(worst, std::fabs(row.error));
+            } else {
+                lambda[i] = -static_cast<double>(row.velocity() + row.bias);
+            }
+        }
+        for (int i = 0; i < n; ++i) {  // W lambda = need, by L L^T (a dropped row gets none)
+            if (loop.dropped[i]) {
+                lambda[i] = 0;
+                continue;
+            }
+            for (int k = 0; k < i; ++k) lambda[i] -= loop.L[static_cast<size_t>(i * n + k)] * lambda[k];
+            lambda[i] /= loop.L[static_cast<size_t>(i * n + i)];
+        }
+        for (int i = n - 1; i >= 0; --i) {
+            if (loop.dropped[i]) continue;
+            for (int k = i + 1; k < n; ++k) lambda[i] -= loop.L[static_cast<size_t>(k * n + i)] * lambda[k];
+            lambda[i] /= loop.L[static_cast<size_t>(i * n + i)];
+        }
+        // A lambda, node by node.
+        const int first_step = tree_start_[static_cast<size_t>(loop.tree)], end_step = tree_start_[static_cast<size_t>(loop.tree) + 1];
+        size_t offset = 0;
+        for (int k = first_step; k < end_step; ++k) {
+            const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+            Scalar change[6] = {};
+            for (int j = 0; j < n; ++j) {
+                const Scalar* column = response_.data() + loop.response + loop.length * static_cast<size_t>(j) + offset;
+                for (int d = 0; d < st.size; ++d) change[d] += column[d] * lambda[j];
+            }
+            offset += static_cast<size_t>(st.size);
+            if (st.body && positions) {
+                st.body->pos += as_vec3(change);
+                st.body->q = integrate_orientation(st.body->q, as_vec3(change + 3), 1);
+            } else if (!st.body && !positions) {
+                for (int r = 0; r < st.size; ++r) apply_impulse(rows[static_cast<size_t>(st.rows[r])], -static_cast<Real>(change[r]));
+            }
+        }
+        if (!positions)
+            for (int i = 0; i < n; ++i) apply_impulse(rows[static_cast<size_t>(loop.rows[i])], static_cast<Real>(lambda[i]));
+    }
+}
+
 void JointTrees::pass(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular, std::vector<Real>* largest) {
-    float* v = vec_.data();
+    Scalar* v = vec_.data();
     tree_error_.assign(static_cast<size_t>(trees_), 0);
     // Right-hand sides: nothing for a body; for a row, the change its speed needs (or, for positions, minus its
     // error, limited).
     for (const Step& st : steps_) {
-        float* y = v + st.vec;
+        Scalar* y = v + st.vec;
         if (st.body)
             for (int r = 0; r < 6; ++r) y[r] = 0;
         else
@@ -385,7 +630,7 @@ void JointTrees::pass(std::vector<JointRow>& rows, bool positions, Real max_line
     // Down the tree, leaves first: each node's own share x = Dinv y, and what it leaves its parent. (With B the
     // block coupling child to parent, the parent loses B^T Dinv y = T^T y, Dinv being symmetric.) A root passes
     // nothing on: its parent's size is 0, and it writes to a scratch slot.
-    float none[6];
+    Scalar none[6];
     for (const Step& st : steps_)
         kDown[static_cast<size_t>(st.size)][static_cast<size_t>(st.parent_size)](
             data_.data() + st.data, v + st.vec, v + st.vec + st.size, st.parent < 0 ? none : v + steps_[static_cast<size_t>(st.parent)].vec);
@@ -398,20 +643,21 @@ void JointTrees::pass(std::vector<JointRow>& rows, bool positions, Real max_line
     }
     // The answer: each body's change of velocity, and each row's impulse (minus mu).
     for (const Step& st : steps_) {
-        const float* x = v + st.vec + st.size;
+        const Scalar* x = v + st.vec + st.size;
         if (st.body && positions) {
-            st.body->pos += Vec3{x[0], x[1], x[2]};
-            st.body->q = integrate_orientation(st.body->q, Vec3{x[3], x[4], x[5]}, 1);
-        } else if (st.body) {
-            st.body->vel += Vec3{x[0], x[1], x[2]};
-            st.body->w += Vec3{x[3], x[4], x[5]};
-        } else if (!positions) {
-            for (int r = 0; r < st.size; ++r) rows[static_cast<size_t>(st.rows[r])].impulse -= x[r];
+            st.body->pos += as_vec3(x);
+            st.body->q = integrate_orientation(st.body->q, as_vec3(x + 3), 1);
+        } else if (!st.body && !positions) {
+            for (int r = 0; r < st.size; ++r) apply_impulse(rows[static_cast<size_t>(st.rows[r])], -static_cast<Real>(x[r]));
         }
     }
-    if (largest)
+    close_loops(rows, positions, max_linear, max_angular);
+    if (largest) {
         for (const Step& st : steps_)
             if (st.joint >= 0) (*largest)[static_cast<size_t>(st.joint)] = tree_error_[static_cast<size_t>(st.tree)];
+        for (const Loop& loop : loops_)
+            for (int i = 0; i < loop.size; ++i) (*largest)[static_cast<size_t>(loop.joint[i])] = tree_error_[static_cast<size_t>(loop.tree)];
+    }
 }
 
 }  // namespace phys3d

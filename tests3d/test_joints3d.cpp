@@ -1185,10 +1185,12 @@ TEST(a_welded_cantilever_holds_its_shape) {
     for (size_t i = 0; i < w.bodies.size(); ++i) CHECK(distance(w.bodies[i].pos, start[i]) < 1e-4f);
 }
 
-TEST(joints_that_do_not_form_a_tree_are_still_solved_one_row_at_a_time) {
-    // Three structures the trees leave to Gauss-Seidel: a ring of four bodies (a loop), a bridge of six held to
-    // the world at both ends (a loop through the world), and a chain with a body that cannot turn about one axis
-    // (whose mass matrix has no inverse). Sweeping is slower but still gets there, and nothing goes wrong.
+TEST(loops_of_joints_are_solved_exactly_and_a_body_that_cannot_turn_is_left_to_sweeping) {
+    // A ring of four bodies (a loop), a bridge of six held to the world at both ends (a loop through the world, and
+    // straight, so that one of its cut rows is implied by the rest and is dropped), and a chain with a body that
+    // cannot turn about one axis (whose mass matrix has no inverse). The loops are cut and put back exactly through
+    // their trees (step 27): one sweep leaves them still. The third is left to Gauss-Seidel, which needs sweeping,
+    // and must never turn that body about that axis.
     for (int kind = 0; kind < 3; ++kind) {
         Lcg rng;
         std::vector<Body> bodies;
@@ -1207,13 +1209,14 @@ TEST(joints_that_do_not_form_a_tree_are_still_solved_one_row_at_a_time) {
             else joints.push_back(Joint::ball(bodies, i - 1, i, {0.6f * static_cast<Real>(i), 0, 0}));
         }
         if (kind == 1) joints.push_back(Joint::ball(bodies, n - 1, -1, {0.6f * static_cast<Real>(n), 0, 0}));
-        const Real locked_spin = bodies[2].w.z;  // (kind 2: about the axis that body cannot turn)
+        const Real locked_spin = bodies[2].w.z;
         std::vector<Body> again = bodies;
-        const Real after_few = worst_two_way_speed(bodies, joints, 5);
+        const Real after_one = worst_two_way_speed(bodies, joints, 1);
         const Real after_many = worst_two_way_speed(again, joints, 400);
-        CHECK(std::isfinite(after_few) && std::isfinite(after_many));
+        CHECK(std::isfinite(after_one) && std::isfinite(after_many));
         CHECK(after_many < 1e-3f);
-        CHECK(after_few > after_many);  // (it took sweeping: these were not solved in one go)
+        if (kind < 2) CHECK(after_one < 1e-4f);  // exactly, at once
+        else CHECK(after_one > 1e-2f);           // (by sweeping)
         if (kind == 2) CHECK(again[2].w.z == locked_spin);  // no impulse turned it about its locked axis
     }
 }
@@ -1280,9 +1283,10 @@ TEST(a_tree_knocked_far_out_of_place_gets_more_passes) {
     CHECK(worst_error(again, joints) < 1e-5f);
 }
 
-TEST(joints_in_a_loop_are_still_corrected_one_row_at_a_time) {
-    // A ring of four bodies joined in a loop is no tree: its joints are corrected as before, row by row, which
-    // closes a loop slowly (each joint's correction opens its neighbours) but surely.
+TEST(a_loop_of_joints_is_closed_in_the_position_pass_like_a_tree) {
+    // A ring of four bodies joined in a loop, one of them pulled 2.4 cm out: the position pass cuts the loop and puts
+    // the cut back through the tree, so one pass leaves what the turning's curvature adds, and a second next to
+    // nothing. (Row by row it took twenty passes to get to 4 mm.)
     std::vector<Body> bodies;
     std::vector<Joint> joints;
     for (int i = 0; i < 4; ++i) {
@@ -1292,13 +1296,128 @@ TEST(joints_in_a_loop_are_still_corrected_one_row_at_a_time) {
     for (int i = 0; i < 4; ++i)
         joints.push_back(Joint::ball(bodies, i, (i + 1) % 4, (bodies[static_cast<size_t>(i)].pos + bodies[static_cast<size_t>((i + 1) % 4)].pos) * 0.5f));
     bodies[1].pos += Vec3{0.01f, 0.02f, -0.01f};
-    SolverSettings five;
-    five.joint_position_iterations = 5;
-    Real gap = worst_gap(bodies, joints);
-    for (int round = 0; round < 4; ++round) {
-        solve_joint_positions(bodies, joints, five);
-        const Real now = worst_gap(bodies, joints);
-        CHECK(now < gap * 0.8f);  // (measured: 2.4 cm, then 10, 7.7, 5.7 and 4.2 mm)
-        gap = now;
+    CHECK(worst_gap(bodies, joints) > 0.02f);
+    SolverSettings once;
+    once.joint_position_iterations = 1;
+    solve_joint_positions(bodies, joints, once);
+    CHECK(worst_gap(bodies, joints) < 2e-4f);  // (measured: 5 * 10^-5)
+    solve_joint_positions(bodies, joints, once);
+    CHECK(worst_gap(bodies, joints) < 1e-6f);
+}
+
+TEST(a_rope_bridge_held_at_both_ends_hangs_together) {
+    // Twelve planks joined by ball joints, the ends joined to the world: a loop through the world. Started as a V
+    // with slack (six planks 30 degrees down, six up), it swings and settles into a sag; its joints stay closed.
+    World w;
+    const Real tilt = kPi / 6, length = 0.45f;
+    int previous = -1;
+    Vec3 at{0, 5, 0};
+    for (int i = 0; i < 12; ++i) {
+        const Real angle = i < 6 ? -tilt : tilt;
+        const Vec3 along{std::cos(angle), std::sin(angle), 0};
+        const int plank = w.add(Body::solid_box({length / 2, 0.03f, 0.4f}, 1, at + along * (length / 2), Quat::from_axis_angle({0, 0, 1}, angle)));
+        w.add_joint(Joint::ball(w.bodies, previous, plank, at));
+        previous = plank;
+        at += along * length;
     }
+    w.add_joint(Joint::ball(w.bodies, previous, -1, at));
+    Real worst = 0;
+    for (int step = 0; step < 600; ++step) {
+        w.step(kDt);
+        worst = std::max(worst, worst_gap(w.bodies, w.joints));
+    }
+    CHECK(w.bodies[5].pos.y < 4.0f);  // it sags
+    CHECK(worst < 1e-4f);             // and holds together
+}
+
+TEST(a_resting_rope_bridge_stores_exactly_the_impulse_that_carries_its_weight) {
+    // The impulses kept for next step's warm start, a loop's included (one end's joint is a tree's, the other the
+    // cut, put back through it): settled, the two ends between them carry the bridge's weight each step.
+    World w;
+    w.allow_sleep = false;
+    const Real tilt = kPi / 6, length = 0.45f;
+    int previous = -1;
+    Vec3 at{0, 5, 0};
+    for (int i = 0; i < 10; ++i) {
+        const Real angle = i < 5 ? -tilt : tilt;
+        const Vec3 along{std::cos(angle), std::sin(angle), 0};
+        const int plank = w.add(Body::solid_box({length / 2, 0.03f, 0.4f}, 1, at + along * (length / 2), Quat::from_axis_angle({0, 0, 1}, angle)));
+        w.add_joint(Joint::ball(w.bodies, previous, plank, at));
+        previous = plank;
+        at += along * length;
+    }
+    const int last = w.add_joint(Joint::ball(w.bodies, previous, -1, at));
+    for (int step = 0; step < 960; ++step) {  // (settled by draining its motion by hand)
+        w.step(kDt);
+        for (Body& b : w.bodies) b.vel *= 0.97f, b.w *= 0.97f;
+    }
+    run(w, 1);
+    Real weight = 0;
+    for (const Body& b : w.bodies) weight += b.mass * kG * kDt;
+    // The first joint pushes its plank (b) up by +y; the last pushes its plank (a) by -y.
+    const Real held = w.joints[0].impulses[1] - w.joints[static_cast<size_t>(last)].impulses[1];
+    CHECK_NEAR(held, weight, 2e-3 * weight);
+}
+
+TEST(the_impulses_kept_are_the_impulses_that_were_applied) {
+    // Each row's accumulated impulse is what the next step starts from, so it must be what the row really did. From
+    // a cold start (nothing carried over), one sweep: Gauss-Seidel, then the trees and the loops exactly. Then each
+    // body's velocity must be where it began plus what every row's kept impulse gives it, M^-1 J^T lambda, for the
+    // rows of trees, of loops' cuts, and of everything else alike.
+    for (int kind = 0; kind < 3; ++kind) {
+        Lcg rng;
+        std::vector<Body> bodies;
+        std::vector<Joint> joints;
+        if (kind == 0) {
+            make_chain(bodies, joints, 8, true, rng);  // a tree
+        } else {
+            const int n = kind == 1 ? 4 : 6;  // a ring; a bridge held at both ends
+            for (int i = 0; i < n; ++i) {
+                const Real angle = 2 * kPi * static_cast<Real>(i) / static_cast<Real>(n);
+                bodies.push_back(Body::solid_box({0.2f, 0.08f, 0.1f}, 1, kind == 1 ? Vec3{std::cos(angle), std::sin(angle), 0} : Vec3{0.6f * static_cast<Real>(i) + 0.3f, 0.1f * static_cast<Real>(i % 2), 0}));
+                bodies.back().vel = rng.in_box(1);
+                bodies.back().w = rng.in_box(1);
+            }
+            for (int i = 0; i < n; ++i) {
+                if (kind == 1) joints.push_back(Joint::ball(bodies, i, (i + 1) % n, (bodies[static_cast<size_t>(i)].pos + bodies[static_cast<size_t>((i + 1) % n)].pos) * 0.5f));
+                else joints.push_back(Joint::ball(bodies, i - 1, i, i == 0 ? Vec3{0, 0, 0} : (bodies[static_cast<size_t>(i - 1)].pos + bodies[static_cast<size_t>(i)].pos) * 0.5f));
+            }
+            if (kind == 2) joints.push_back(Joint::ball(bodies, n - 1, -1, bodies.back().pos + Vec3{0.3f, 0, 0}));
+        }
+        std::vector<Vec3> v0, w0;
+        for (const Body& b : bodies) v0.push_back(b.vel), w0.push_back(b.w);
+        JointSolver solver;
+        SolverSettings cold;
+        cold.warm_starting = false;
+        solver.prepare(bodies, joints, kDt, cold);
+        solver.solve_velocity(/*exactly=*/true);
+        std::vector<Vec3> v = v0, w = w0;
+        for (const JointRow& r : solver.rows()) {
+            if (r.a->type == BodyType::Dynamic) {
+                const size_t i = static_cast<size_t>(r.a - bodies.data());
+                v[i] += r.lin_a * (r.a->inv_mass * r.impulse), w[i] += r.inv_i_ang_a * r.impulse;
+            }
+            if (r.b->type == BodyType::Dynamic) {
+                const size_t i = static_cast<size_t>(r.b - bodies.data());
+                v[i] += r.lin_b * (r.b->inv_mass * r.impulse), w[i] += r.inv_i_ang_b * r.impulse;
+            }
+        }
+        Real worst = 0;
+        for (size_t i = 0; i < bodies.size(); ++i) worst = std::max({worst, distance(v[i], bodies[i].vel), distance(w[i], bodies[i].w)});
+        CHECK(worst < 1e-4f);
+    }
+}
+
+TEST(a_joint_given_twice_is_no_trouble) {
+    // Two identical ball joints between the same two bodies: the second closes a loop, and every one of its rows is
+    // implied by the first's, so all are dropped (given no impulse). The pair is still solved exactly.
+    Lcg rng;
+    std::vector<Body> bodies;
+    bodies.push_back(Body::solid_box({0.2f, 0.1f, 0.1f}, 1, {0, 0, 0}));
+    bodies.push_back(Body::solid_box({0.2f, 0.1f, 0.1f}, 1, {0.4f, 0, 0}));
+    for (Body& b : bodies) b.vel = rng.in_box(1), b.w = rng.in_box(2);
+    std::vector<Joint> joints{Joint::ball(bodies, 0, 1, {0.2f, 0, 0}), Joint::ball(bodies, 0, 1, {0.2f, 0, 0})};
+    const Real left = worst_two_way_speed(bodies, joints, 1);
+    CHECK(std::isfinite(left) && left < 1e-4f);
+    CHECK(std::isfinite(bodies[0].vel.x) && bodies[0].vel.length() < 10);
 }
