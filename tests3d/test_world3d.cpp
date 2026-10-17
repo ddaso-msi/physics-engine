@@ -587,3 +587,49 @@ TEST(friction_is_warm_started_too) {
         CHECK_NEAR(w.bodies[1].vel.length(), 0, 0.001);
     }
 }
+
+TEST(a_body_with_more_contacts_than_colours_still_holds_its_load) {
+    // A slab on the floor carrying 80 cubes: 81 contacts on one moving body. The solver gives each contact the
+    // lowest colour none of its moving bodies' other contacts has, and solves a colour four contacts at a time;
+    // there are 64 colours, and whatever finds the first 63 taken shares the last, where contacts may share a
+    // body and are solved one at a time (step 24). Both ways must hold: every cube rests on the slab, level.
+    World w;
+    w.add(floor_box());
+    const int slab = w.add(Body::solid_box({4.6f, 0.1f, 4.6f}, 1, {0, 0.1f, 0}));
+    for (int i = 0; i < 80; ++i) {
+        Body cube = Body::solid_box({0.2f, 0.2f, 0.2f}, 1, {static_cast<Real>(i % 9) - 4.0f, 0.4f, static_cast<Real>(i / 9) - 4.0f});
+        w.add(cube);
+    }
+    run(w, 240);
+    CHECK(w.stats().contacts > 80 || w.contacts().size() > 80);
+    CHECK_NEAR(w.bodies[static_cast<size_t>(slab)].pos.y, 0.1, 0.01);
+    for (size_t i = static_cast<size_t>(slab) + 1; i < w.bodies.size(); ++i) {
+        CHECK_NEAR(w.bodies[i].pos.y, 0.4, 0.01);
+        CHECK(w.bodies[i].vel.length() < 0.01f);
+    }
+}
+
+TEST(contacts_on_one_body_beyond_the_colours_keep_momentum) {
+    // Weightless: a heavy ball with 70 small ones all touching it and moving in on it. Every contact pushes the
+    // pair equally and oppositely, so the total momentum cannot change, however the contacts are coloured;
+    // including the ones on the heavy ball beyond the 63rd colour, which share it and are solved one at a time
+    // (four at a time, each lane would write the heavy ball's velocity and only the last would count).
+    World w;
+    w.gravity = {};
+    w.add(Body::solid_sphere(1, 5, {0, 0, 0}));
+    for (int i = 0; i < 70; ++i) {
+        // spread over the sphere (a golden-angle spiral), each just touching the heavy ball
+        const Real y = 1 - 2 * (static_cast<Real>(i) + 0.5f) / 70, ring = std::sqrt(1 - y * y), turn = 2.39996f * static_cast<Real>(i);
+        const Vec3 out{ring * std::cos(turn), y, ring * std::sin(turn)};
+        Body ball = Body::solid_sphere(0.1f, 1, out * 1.099f);
+        ball.vel = -out * (0.5f + 0.01f * static_cast<Real>(i));
+        w.add(ball);
+    }
+    Vec3 before;
+    for (const Body& b : w.bodies) before += b.vel * b.mass;
+    w.step(kDt);
+    Vec3 after;
+    for (const Body& b : w.bodies) after += b.vel * b.mass;
+    CHECK(w.stats().contacts >= 70);
+    CHECK(distance(after, before) < 1e-4f);
+}

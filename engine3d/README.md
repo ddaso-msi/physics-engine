@@ -1172,6 +1172,45 @@ the trees take has none; kept, being the right formula), and the trees not inter
 sweep (both cost time only). A check that a tree has at most one joint held to the world was deleted: a second one is
 left with an empty diagonal block, which the factoring already refuses.
 
+## Step 24: four contacts at a time
+
+Contacts of one colour share no moving body (step 19), so they can be solved side by side. `WideConstraint` holds four
+contacts, one per lane of a 4-wide vector (`float __attribute__((vector_size(16)))`, which GCC and Clang turn into NEON or
+SSE), and does exactly the arithmetic `ContactConstraint` does, on four of everything: the bodies' velocities are
+gathered into lanes, friction and then the normals are solved, and they are scattered back to the bodies that can move.
+A lane without a contact, or a point slot a contact does not have, is given no mass and moves nothing. The last colour,
+shared by whatever found the first 63 taken (a body with more than 63 contacts), may repeat a body within four, and is
+still solved one contact at a time.
+
+Four things it took, measured on the solver alone:
+
+- Plain loops over four lanes were unrolled by the compiler but not vectorised (its cost model said not worth it), and the
+  sweeps were no faster. Written with the vector type, they were 40% faster.
+- Building each contact as a scalar constraint, keeping them all, and then copying them into lanes, cost more than the
+  sweeps saved. Each is now prepared on the stack and dropped straight into its lane.
+- A colour's order is free, so its contacts are sorted by number of points: four are solved for as many points as the
+  most any of them has, and a sphere's single point beside a crate's four wasted three slots.
+- `emplace_back` clears a new element, and a WideConstraint is three kilobytes; it now has an empty constructor, and
+  packing clears only what is read.
+
+| solver, ms per step | step 23 | step 24 |
+|---|---|---|
+| crates 250 | 0.138 | 0.087 |
+| crates 1000 | 0.603 | 0.455 |
+| crates 2000 | 1.262 | 0.924 |
+| mixed 1000 | 0.566 | 0.481 |
+| lumps 1000 | 0.617 | 0.504 |
+
+Whole steps: crates 1000 1.40 to 1.24 ms, crates 2000 3.21 to 2.83; the chains scene (joints) unchanged. On a snapshot,
+the velocities after a solve are those of step 23 to 2 * 10^-7.
+
+Tests (2, 279 in total): a slab carrying 80 cubes (81 contacts on one body) holds them all level, and a heavy ball with 70
+small ones closing on it in weightlessness keeps the total momentum, which it would not if the contacts sharing it beyond
+the 63rd colour were solved four at a time (only the last lane's change to its velocity would count). Deliberate
+breakages: 10; caught: the shared colour never solved, or solved in fours; friction not limited; normals that pull;
+missing points not cleared (caught once the automatic clearing went); the warm start, or the kept impulses, dropped; b
+pushed with a's inverse mass; b's spin not written back. Not caught: contacts not grouped by point count (time only).
+
 ## Planned next
 
-The contact solver across a colour, several contacts at a time (SIMD).
+To be decided.

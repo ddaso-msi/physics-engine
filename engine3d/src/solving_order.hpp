@@ -15,10 +15,14 @@
 
 namespace phys3d {
 
-// `bodies_of(i, a, b)` sets the two body indices of constraint i and returns false to leave it out.
+// The number of colours. The last is shared by everything that finds the others taken (a body in more than 63
+// constraints), so within it two constraints may share a body.
+constexpr int kColours = 64;
+
+// `bodies_of(i, a, b)` sets the two body indices of constraint i and returns false to leave it out. If `starts` is
+// given it receives, for each colour, where its constraints begin in the order, and last where the order ends.
 template <class BodiesOf>
-std::vector<size_t> solving_order(const std::vector<Body>& bodies, size_t count, BodiesOf bodies_of) {
-    constexpr int kColours = 64;
+std::vector<size_t> solving_order(const std::vector<Body>& bodies, size_t count, BodiesOf bodies_of, std::vector<size_t>* starts = nullptr) {
     std::vector<std::uint64_t> taken(bodies.size(), 0);  // per body: the colours its constraints have so far
     std::vector<int> colour(count, -1);
     int per_colour[kColours] = {};
@@ -37,6 +41,10 @@ std::vector<size_t> solving_order(const std::vector<Body>& bodies, size_t count,
     int start[kColours];
     int total = 0;
     for (int k = 0; k < kColours; ++k) start[k] = total, total += per_colour[k];
+    if (starts) {
+        starts->assign(start, start + kColours);
+        starts->push_back(static_cast<size_t>(total));
+    }
     std::vector<size_t> order(static_cast<size_t>(total));
     for (size_t i = 0; i < count; ++i)
         if (colour[i] >= 0) order[static_cast<size_t>(start[colour[i]]++)] = i;
