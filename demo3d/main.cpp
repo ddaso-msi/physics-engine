@@ -6,6 +6,8 @@
 //   left-drag  orbit the camera          wheel  zoom
 //   1 tower   2 pyramid   3 mixed rain   4 slope (friction and rolling)   5 tumble (zero gravity)
 //   6 chains, a bridge and a spring (ball and distance joints)   7 hinges: a door, a flail, a motor
+//   8 a rope bridge (hinges, held at both ends: a loop)   9 ragdolls down a flight of stairs
+//   0 welded rods swinging into each other, and a welded beam holding a weight out from a post
 //   Space  shoot a ball from the camera   F  drop 10 more random bodies
 //   W  warm starting on/off   - / =  fewer / more solver sweeps   G  gyroscopic term: implicit / explicit / off
 //   N  narrow phase: per-shape routines / GJK and EPA
@@ -36,8 +38,8 @@ constexpr int kWidth = 960, kHeight = 640;
 constexpr size_t kMaxBodies = 1200;  // a debug build gets slow well before this
 constexpr Real kDt = 1.0f / 120.0f;
 
-enum class Scene { Tower = 1, Pyramid, Rain, Slope, Tumble, Chains, Machines };
-constexpr int kSceneCount = 7;
+enum class Scene { Tower = 1, Pyramid, Rain, Slope, Tumble, Chains, Machines, RopeBridge, Ragdolls, Welds };
+constexpr int kSceneCount = 10;
 const char* scene_name(Scene s) {
     switch (s) {
         case Scene::Tower: return "tower";
@@ -46,6 +48,9 @@ const char* scene_name(Scene s) {
         case Scene::Slope: return "slope";
         case Scene::Chains: return "chains and a bridge (ball joints, a spring)";
         case Scene::Machines: return "hinges: door, flail, motor";
+        case Scene::RopeBridge: return "rope bridge (hinges, a loop through the world)";
+        case Scene::Ragdolls: return "ragdolls (ball joints with cones, hinges with limits)";
+        case Scene::Welds: return "welded rods, and a welded beam";
         default: return "tumble (zero gravity)";
     }
 }
@@ -103,6 +108,43 @@ void add_random_bodies(World& w, Lcg& rng, int count, float height) {
             w.add(crate(pos, {rng.range(0.25f, 0.6f), rng.range(0.25f, 0.6f), rng.range(0.25f, 0.6f)}, q));
         }
     }
+}
+
+// A ragdoll standing at `at` (the middle of its torso): a torso; a head on a neck; arms and legs of two capsules
+// each. Shoulders, hips and neck are ball joints kept inside a cone; elbows and knees are hinges that bend one way.
+// Every joint is part of one tree, solved exactly.
+void add_ragdoll(World& w, Vec3 at, Vec3 velocity) {
+    const size_t first = w.bodies.size();
+    const int torso = w.add(crate(at, {0.22f, 0.32f, 0.12f}));
+    const int head = w.add(Body::solid_sphere(0.15f, 1, at + Vec3{0, 0.5f, 0}));
+    Joint neck = Joint::ball(w.bodies, torso, head, at + Vec3{0, 0.35f, 0});
+    neck.limit_cone(w.bodies, {0, 1, 0}, 0.6f);
+    w.add_joint(neck);
+    // Limbs: [shoulder or hip, the way it hangs, upper length, lower length, radius, cone, which way the middle joint bends]
+    struct Limb {
+        Vec3 root;
+        Real upper, lower, radius, cone, bend;
+    };
+    const Limb limbs[4] = {{{0.3f, 0.26f, 0}, 0.13f, 0.12f, 0.06f, 1.9f, 1},
+                           {{-0.3f, 0.26f, 0}, 0.13f, 0.12f, 0.06f, 1.9f, 1},
+                           {{0.12f, -0.36f, 0}, 0.18f, 0.17f, 0.08f, 1.2f, -1},
+                           {{-0.12f, -0.36f, 0}, 0.18f, 0.17f, 0.08f, 1.2f, -1}};
+    for (const Limb& limb : limbs) {
+        const Vec3 root = at + limb.root;
+        const Real upper_length = 2 * (limb.upper + limb.radius), lower_length = 2 * (limb.lower + limb.radius);
+        const int upper = w.add(Body::solid_capsule(limb.upper, limb.radius, 1, root - Vec3{0, upper_length / 2, 0}));
+        Joint ball = Joint::ball(w.bodies, torso, upper, root);
+        ball.limit_cone(w.bodies, {0, -1, 0}, limb.cone);
+        w.add_joint(ball);
+        const Vec3 middle = root - Vec3{0, upper_length, 0};
+        const int lower = w.add(Body::solid_capsule(limb.lower, limb.radius, 1, middle - Vec3{0, lower_length / 2, 0}));
+        Joint hinge = Joint::hinge(w.bodies, upper, lower, middle, {1, 0, 0});
+        hinge.enable_limit = true;  // an elbow bends forward, a knee back, each by up to about 140 degrees
+        hinge.lower = limb.bend > 0 ? -2.4f : -0.05f;
+        hinge.upper = limb.bend > 0 ? 0.05f : 2.4f;
+        w.add_joint(hinge);
+    }
+    for (size_t i = first; i < w.bodies.size(); ++i) w.bodies[i].vel = velocity;
 }
 
 void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
@@ -255,7 +297,91 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
             cam.pitch = 0.45f;
             break;
         }
+        case Scene::RopeBridge: {
+            // Sixteen planks hinged end to end and hung from two posts with slack, started as a V so it swings into
+            // its sag. Fixed at both ends it is a loop through the world: cut at one end and put back exactly
+            // through the rest (step 27). Then a few crates are dropped across it.
+            const int planks = 16;
+            const Real length = 0.55f, tilt = 0.32f;
+            const Real span = static_cast<Real>(planks) * length * std::cos(tilt);
+            Vec3 at{-span / 2, 4, 0};
+            for (const Real x : {at.x, at.x + span}) w.add(Body::fixed_box({0.15f, 2, 0.15f}, {x, 2, -0.75f})), w.add(Body::fixed_box({0.15f, 2, 0.15f}, {x, 2, 0.75f}));
+            int previous = -1;
+            for (int i = 0; i < planks; ++i) {
+                const Real angle = i < planks / 2 ? -tilt : tilt;
+                const Vec3 along{std::cos(angle), std::sin(angle), 0};
+                const int plank = w.add(crate(at + along * (length / 2), {length / 2, 0.04f, 0.6f}, Quat::from_axis_angle({0, 0, 1}, angle)));
+                w.add_joint(Joint::hinge(w.bodies, previous, plank, at, {0, 0, 1}));
+                previous = plank;
+                at += along * length;
+            }
+            w.add_joint(Joint::hinge(w.bodies, previous, -1, at, {0, 0, 1}));
+            for (int i = 0; i < 5; ++i) w.add(crate({-2.4f + 1.2f * static_cast<float>(i), 5.5f + 0.8f * static_cast<float>(i), 0}, {0.3f, 0.3f, 0.3f}));
+            cam.target = {0, 2.5f, 0};
+            cam.distance = 13;
+            cam.yaw = 0.25f;
+            cam.pitch = 0.15f;
+            break;
+        }
+        case Scene::Ragdolls: {
+            // A flight of six steps, and three ragdolls dropped at the top of it.
+            for (int i = 0; i < 6; ++i) {
+                Body step = Body::fixed_box({0.5f, 0.25f * static_cast<float>(i + 1), 2}, {3 - static_cast<float>(i), 0.25f * static_cast<float>(i + 1), 0});
+                step.friction = 0.6f;
+                w.add(step);
+            }
+            // (each pushed off the top step, down the flight)
+            for (int i = 0; i < 3; ++i)
+                add_ragdoll(w, {-1.7f, 3.6f + 1.6f * static_cast<float>(i), -1.1f + 1.1f * static_cast<float>(i)}, {2.2f + 0.4f * static_cast<float>(i), 0, 0});
+            cam.target = {0.5f, 1.5f, 0};
+            cam.distance = 12;
+            cam.yaw = 0.6f;
+            cam.pitch = 0.3f;
+            break;
+        }
+        case Scene::Welds: {
+            // Five rods of six to ten welded links, each hung from a ball joint and started leaning the same way:
+            // being of different lengths they swing at different rates, drift out of step and knock into one
+            // another. Each rod is a tree, solved exactly, so it stays straight; Gauss-Seidel alone let a rod like
+            // this bend at its welds.
+            for (int r = 0; r < 5; ++r) {
+                const Vec3 top{-4 + 2 * static_cast<float>(r), 7.5f, -1.5f};
+                const Vec3 lean = Vec3{-0.3f, -1, 0.12f * static_cast<float>(r - 2)}.normalized();
+                const Quat q = Quat::from_axis_angle(cross({0, -1, 0}, lean), std::acos(-lean.y));
+                int previous = -1;
+                for (int i = 0; i < 6 + r; ++i) {
+                    const int link = w.add(crate(top + lean * (0.3f + 0.6f * static_cast<float>(i)), {0.07f, 0.3f, 0.07f}, q));
+                    w.add_joint(previous < 0 ? Joint::ball(w.bodies, -1, link, top) : Joint::weld(w.bodies, previous, link, top + lean * (0.6f * static_cast<float>(i))));
+                    previous = link;
+                }
+            }
+            // A beam of ten welded links sticking out of a post, a heavy ball welded to its tip.
+            const Vec3 root{-4, 4, 4};
+            w.add(Body::fixed_box({0.2f, 2, 0.2f}, {root.x - 0.2f, 2, root.z}));
+            int previous = -1;
+            for (int i = 0; i < 10; ++i) {
+                const int link = w.add(crate(root + Vec3{0.3f + 0.6f * static_cast<float>(i), 0, 0}, {0.3f, 0.1f, 0.1f}));
+                w.add_joint(Joint::weld(w.bodies, previous, link, root + Vec3{0.6f * static_cast<float>(i), 0, 0}));
+                previous = link;
+            }
+            const int ball = w.add(Body::solid_sphere(0.45f, 4, root + Vec3{6.45f, 0, 0}));
+            w.add_joint(Joint::weld(w.bodies, previous, ball, root + Vec3{6, 0, 0}));
+            cam.target = {0, 3.5f, 0.5f};
+            cam.distance = 17;
+            cam.yaw = 0.35f;
+            cam.pitch = 0.2f;
+            break;
+        }
     }
+}
+
+// How far apart the two anchors of the worst joint are, among those whose anchors should meet (ball, hinge, weld).
+Real worst_joint_gap(const World& w) {
+    Real worst = 0;
+    for (const Joint& j : w.joints)
+        if (j.type == JointType::Ball || j.type == JointType::Hinge || j.type == JointType::Weld)
+            worst = std::max(worst, distance(j.world_anchor_a(w.bodies), j.world_anchor_b(w.bodies)));
+    return worst;
 }
 
 struct Painter {
@@ -434,8 +560,12 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_KEY_DOWN) {
                 switch (e.key.key) {
                     case SDLK_ESCAPE: running = false; break;
-                    case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6: case SDLK_7:
+                    case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
                         scene = static_cast<Scene>(static_cast<int>(e.key.key - SDLK_1) + 1);
+                        load_scene(scene, world, cam, rng);
+                        break;
+                    case SDLK_0:
+                        scene = Scene::Welds;
                         load_scene(scene, world, cam, rng);
                         break;
                     case SDLK_R: case SDLK_BACKSPACE: load_scene(scene, world, cam, rng); break;
@@ -490,7 +620,7 @@ int main(int argc, char** argv) {
         draw_world(renderer, world, cam, show_contacts);
         if (show_text) {
             SDL_SetRenderDrawColor(renderer, 150, 154, 170, 255);
-            SDL_RenderDebugText(renderer, 16, 12, "drag orbit | wheel zoom | 1-7 scene | Space shoot | F drop 10 | R reload | Tab pause | H hide text");
+            SDL_RenderDebugText(renderer, 16, 12, "drag orbit | wheel zoom | 1-9, 0 scene | Space shoot | F drop 10 | R reload | Tab pause | H hide text");
             SDL_RenderDebugTextFormat(renderer, 16, 28, "scene: %s | bodies %d | contact pairs %d | step %.2f ms%s", scene_name(scene),
                                       static_cast<int>(world.bodies.size()) - 1, static_cast<int>(world.contacts().size()), step_ms,
                                       paused ? " | PAUSED" : "");
@@ -505,6 +635,9 @@ int main(int argc, char** argv) {
                                       world.allow_sleep ? "on" : "OFF", static_cast<int>(world.stats().awake_bodies),
                                       static_cast<int>(world.stats().islands), world.continuous ? "on" : "OFF",
                                       static_cast<int>(world.stats().ccd_swept), static_cast<int>(world.stats().ccd_hits));
+            if (!world.joints.empty())
+                SDL_RenderDebugTextFormat(renderer, 16, 92, "joints %d | worst gap between a joint's anchors: %.4f mm", static_cast<int>(world.joints.size()),
+                                          static_cast<double>(worst_joint_gap(world)) * 1000);
         }
         if (capture) {
             SDL_Surface* surf = SDL_RenderReadPixels(renderer, nullptr);

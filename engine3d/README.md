@@ -1310,6 +1310,25 @@ pass, the cut rows' impulses or the tree rows' changes not applied, an impulse k
 round. Not caught: no row ever dropped (only an exactly singular row was met, which a pivot of exactly zero drops anyway;
 the threshold is not pinned by a test), and cut joints not marked as done (time only).
 
+## Step 28: demo scenes for the joints
+
+Steps 21 to 27 changed how joints are solved, and had only been seen as numbers. Three scenes in `demo3d` show them:
+
+- `8` a rope bridge: sixteen planks hinged end to end and hung with slack from posts at both ends (a loop through the
+  world, step 27), started as a V; it swings into its sag and five crates are dropped on it.
+- `9` ragdolls: three, pushed off the top of a flight of six steps. Each is one tree (step 23): neck, shoulders and
+  hips are ball joints held inside cones, elbows and knees hinges with limits that bend one way.
+- `0` welded structures: five rods of six to ten welded links, each hung from a ball joint and started leaning the
+  same way, so that, swinging at different rates, they drift out of step and knock together; and a beam of ten welded
+  links sticking out of a post with a heavy ball welded to its tip, which stays straight (row by row it sagged).
+
+The text now also shows the largest gap between a joint's two anchors (balls, hinges, welds): in all three it stays
+under a micrometre or so. Checked headless (`--capture`) at the start and after 4 and 10 seconds; the rods were first
+started through each other, and one ragdoll fell off the back of the steps, both changed. Two things seen are not
+faults: the bridge is still swinging, slowly, after ten seconds, and a ragdoll's head rocks back and forth on the
+ground on its neck, because nothing in the engine damps a swing or a roll (there is no joint damping or rolling
+resistance), so neither falls asleep for a long while.
+
 ## Planned next
 
 To be decided.
