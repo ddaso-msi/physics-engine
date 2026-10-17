@@ -121,13 +121,14 @@ private:
     TreeBroadphase tree_;
     std::vector<AABB> boxes_;  // scratch, reused every step
     std::vector<std::uint8_t> immovable_;
-    std::unordered_set<std::uint64_t> no_collide_;
+    std::unordered_set<std::uint64_t> no_collide_;  // body pairs joined by a joint that forbids their collision
     // What GJK ended with for each candidate pair last step, in the broad phase's order (sorted by pair).
     struct CachedPair {
         std::uint64_t key;
         GjkCache gjk;
     };
-    std::vector<CachedPair> gjk_cache_, gjk_cache_next_;  // body pairs joined by a joint that forbids their collision
+    std::vector<CachedPair> gjk_cache_, gjk_cache_next_;
+    JointSolver joint_solver_;  // kept from step to step, so that the joint trees' storage is too (step 23)
 };
 
 }  // namespace phys3d

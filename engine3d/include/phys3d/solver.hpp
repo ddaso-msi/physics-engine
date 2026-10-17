@@ -30,9 +30,10 @@ struct ContactPair {
 // Changes the bodies' velocities so every joint's constraint holds and no contact is closing, with bounce
 // and friction from the materials. Joints and contacts take part in the same sweeps, joints first in each
 // (holding a hinge together outranks a touch). Reads each contact point's and joint row's stored impulses
-// (when warm starting) and writes the final ones back.
+// (when warm starting) and writes the final ones back. `joint_solver`, if given, is used (and its storage
+// kept for next time) in place of a fresh one.
 void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, std::vector<Joint>& joints, Real dt,
-                       const SolverSettings& settings);
+                       const SolverSettings& settings, JointSolver* joint_solver = nullptr);
 // Contacts only.
 inline void solve_contacts(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, Real dt, const SolverSettings& settings) {
     std::vector<Joint> none;

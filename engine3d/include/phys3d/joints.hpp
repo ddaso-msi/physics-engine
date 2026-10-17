@@ -21,6 +21,8 @@
 
 #include <phys/solver_settings.hpp>
 
+#include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -123,8 +125,15 @@ struct JointRow {
     Real velocity() const { return dot(lin_a, a->vel) + dot(ang_a, a->w) + dot(lin_b, b->vel) + dot(ang_b, b->w); }
 };
 
+class JointTrees;  // (step 23: joints that form a tree, solved exactly; see src/joint_trees.hpp)
+
 class JointSolver {
 public:
+    JointSolver();
+    ~JointSolver();
+    JointSolver(JointSolver&&) noexcept;
+    JointSolver& operator=(JointSolver&&) noexcept;
+
     // Builds this step's rows from the bodies' current poses. `joints` and `bodies` must not be resized
     // until store() has been called. `for_velocity` false builds rows for the position pass: stored
     // impulses are left untouched.
@@ -133,7 +142,9 @@ public:
     void prepare(std::vector<Body>& bodies, std::span<Joint> joints, Real dt, const SolverSettings& settings,
                  bool for_velocity = true, int only_row = -1);
     void warm_start();     // re-applies last step's impulses
-    void solve_velocity(); // one sweep over all rows
+    // One sweep over all rows, one at a time; then, if `exactly`, the rows of joints that form trees solved
+    // exactly (step 23). The contact solver asks for that in its last sweep.
+    void solve_velocity(bool exactly = true);
     void store();          // saves the accumulated impulses back into the joints
 
     const std::vector<JointRow>& rows() const { return rows_; }
@@ -147,6 +158,8 @@ private:
     Body world_ = Body::fixed({});
     int counted_ = 0;   // rows the last prepare() came to, built or not
     JointRow skipped_;  // where the rows not asked for go
+    std::unique_ptr<JointTrees> trees_;
+    std::vector<int> first_row_;  // where each joint's rows begin (and, last, where the rows end)
 };
 
 // Position correction, run after the bodies have moved: shifts positions and orientations directly to

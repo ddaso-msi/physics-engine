@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 
 namespace phys3d {
@@ -107,10 +108,11 @@ struct ContactConstraint {
 }  // namespace
 
 void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& contacts, std::vector<Joint>& joints, Real dt,
-                       const SolverSettings& settings) {
+                       const SolverSettings& settings, JointSolver* reuse) {
     // Joint rows are prepared first but change no velocities, so the contacts below still measure their
     // arrival speeds from the unmodified velocities.
-    JointSolver joint_solver;
+    std::optional<JointSolver> fresh;
+    JointSolver& joint_solver = reuse ? *reuse : fresh.emplace();
     joint_solver.prepare(bodies, joints, dt, settings);
 
     std::vector<ContactConstraint> constraints;
@@ -173,7 +175,7 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     }
 
     for (int sweep = 0; sweep < settings.iterations; ++sweep) {
-        joint_solver.solve_velocity();
+        joint_solver.solve_velocity(/*exactly=*/sweep == settings.iterations - 1);
         for (ContactConstraint& c : constraints) {
             Motion m = c.load();
             // Friction first; the normal constraint gets the last word in each sweep.

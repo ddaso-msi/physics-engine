@@ -1,5 +1,6 @@
 #include <phys3d/joints.hpp>
 
+#include "joint_trees.hpp"
 #include "solving_order.hpp"
 
 #include <algorithm>
@@ -174,10 +175,16 @@ void apply_displacement(JointRow& r, Real lambda) {
 
 }  // namespace
 
+JointSolver::JointSolver() : trees_(std::make_unique<JointTrees>()) {}
+JointSolver::~JointSolver() = default;
+JointSolver::JointSolver(JointSolver&&) noexcept = default;
+JointSolver& JointSolver::operator=(JointSolver&&) noexcept = default;
+
 void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Real dt, const SolverSettings& s,
                           bool for_velocity, int only_row) {
     rows_.clear();
     counted_ = 0;
+    first_row_.clear();
 
     // A joint whose bodies are all asleep (or fixed) has nothing to do; its stored impulses wait. The rest are
     // taken colour by colour (see solving_order.hpp), unless there is only one: the position pass prepares
@@ -195,6 +202,7 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
         Body* A = j.a < 0 ? &world_ : &bodies[static_cast<size_t>(j.a)];
         Body* B = j.b < 0 ? &world_ : &bodies[static_cast<size_t>(j.b)];
         const Mat3 inv_ia = A->inv_inertia_world(), inv_ib = B->inv_inertia_world();
+        first_row_.push_back(static_cast<int>(rows_.size()));
 
         // Velocity pass: move last step's impulses aside; slots not claimed by a row this step end up zero.
         Real old[Joint::kMaxRows] = {};
@@ -356,16 +364,20 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
             }
         }
     }
+    if (for_velocity) {
+        first_row_.push_back(static_cast<int>(rows_.size()));
+        trees_->build(bodies, rows_, first_row_);
+    }
 }
 
 void JointSolver::warm_start() {
     for (JointRow& r : rows_) apply_impulse(r, r.impulse);
 }
 
-void JointSolver::solve_velocity() {
-    // A joint's rows come one after another and all act on the same two bodies, so their velocities are read
-    // once, the rows solved on copies held in registers, and written back once, and only to a body that can
-    // move (as the contacts do; see solver.cpp).
+void JointSolver::solve_velocity(bool exactly) {
+    // Every row, one at a time. A joint's rows come one after another and all act on the same two bodies, so
+    // their velocities are read once, the rows solved on copies held in registers, and written back once, and
+    // only to a body that can move (as the contacts do; see solver.cpp).
     for (size_t first = 0; first < rows_.size();) {
         Body* a = rows_[first].a;
         Body* b = rows_[first].b;
@@ -387,6 +399,9 @@ void JointSolver::solve_velocity() {
         if (b->type == BodyType::Dynamic) b->vel = vb, b->w = wb;
         first = i;
     }
+    // Then the trees, exactly. (Every sweep cost 0.2 ms more at a thousand joints and held them no better: the
+    // mean gap in the chains scene was the same, the worst moved both ways by a millimetre or so.)
+    if (exactly) trees_->solve(rows_);
 }
 
 void JointSolver::store() {

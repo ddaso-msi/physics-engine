@@ -1112,6 +1112,66 @@ Also seen: welded chains are held poorly whatever the pass (a mean gap of 4 mm, 
 welded end to end and leaning collide with their neighbours). That is the case for a different method (solving a
 whole chain, not a joint, at once) and is left open.
 
+## Step 23: joints solved exactly, a tree at a time
+
+Step 22 ended with welded chains held poorly when they collide. Measured first, the cause is not the collisions:
+one chain of ten links welded end to end and to the world, alone, sagged and opened by 2.3 mm on average and 14 mm
+at worst. Gauss-Seidel passes a correction along a chain one joint per sweep, and ten sweeps cannot make a 7 m
+welded rod rigid (160 sweeps: 0.2 mm). More position passes barely helped.
+
+For joints that form a tree (chains, ragdolls: anything without a loop) the equations can be solved exactly in
+time proportional to their number (Baraff, "Linear-Time Dynamics using Lagrange Multipliers", 1996): take the bodies'
+velocity changes and the rows' impulses together,
+
+    [ M  J^T ] [ dv ]   [ 0 ]
+    [ J   0  ] [ mu ] = [ c ]        c = -(J v + bias),  the impulse is -mu,
+
+a matrix with a block per body and per joint whose graph is the joints' own tree, and eliminate it leaves first:
+each elimination changes only the parent's diagonal block, so nothing fills in. `JointTrees` (src/joint_trees.hpp)
+finds the trees among the joints each step, factors them (in double precision; Cholesky for each block, which is
+positive definite for a body and negative definite for a joint), and solves them in one pass down and one up.
+Only the rows that hold both ways rigidly are taken: anchors, hinge and weld axes, slider rails. Limits, motors, the
+cone and springs, and joints in a loop (a structure fixed to the world at two places is a loop through the world)
+or on a body that cannot turn about some axis, are left to Gauss-Seidel as before.
+
+Two things were tried on the way and are worth knowing:
+
+- A first estimate, sweeping the joints 30 times within each sweep, made colliding welded chains blow up (links at
+  96 m/s). The chains scene with welds in place of ball joints welds each chain to the world as well: rigid 7 m
+  cantilevers, started at random leans, some through each other, with no physical way apart. Soft joints had hidden
+  that by bending. The exact solve does not blow up even there, and on a fair version (welded rods hung from a ball
+  joint, so they can swing into each other) neither method does.
+- Solving the trees exactly in every sweep held the joints no better than solving them exactly in the last sweep
+  only, with every row swept one at a time before it (the mean gap was the same; the worst moved by a millimetre or
+  so either way), and cost 0.2 ms more at a thousand joints. So the last sweep does it.
+
+What it costs was mostly not arithmetic. Clearing a kilobyte of node per joint and per body every step cost more
+than factoring; the per-node loops of unknown length (3, 5 or 6 rows) were slow until each size had its own
+unrolled copy; and the world now keeps its `JointSolver` between steps so that the trees' storage is kept too.
+
+| 1000 links, seconds 1 to 8 | before (step 22) | trees |
+|---|---|---|
+| one welded cantilever: mean / worst gap | 2.3 / 14 mm | 0 / 0 (it does not move) |
+| welded cantilevers colliding: mean / worst | 3.5 mm / 4.2 cm | 0.05 / 2.5 mm |
+| welded rods on a ball joint, colliding: mean / worst | 0.88 mm / 3.3 cm | 0.10 / 5.1 mm |
+| hinge chains colliding: mean / worst | 0.22 / 5.7 mm | 0.11 / 2.0 mm |
+| ball chains colliding: mean / worst | 0.11 / 2.1 mm | 0.11 / 1.6 mm |
+
+and in the benchmark (ball chains, which needed it least): solver 0.25 to 0.55 ms at 1000 links, step 0.96 to 1.26;
+the crate scenes, without joints, unchanged.
+
+Tests (5, 277 in total): a chain of every rigid joint, held or free, and a ragdoll-shaped tree are each solved
+exactly in one sweep; a free tree keeps its momentum, linear and angular; a welded cantilever holds its shape; and a
+ring, a bridge held at both ends, and a chain with a body that cannot turn about one axis are still solved, by
+sweeping, and that body is never turned about that axis. Deliberate breakages: 14; caught: no trees, a body that
+cannot turn taken into a tree (once that test turned the body about an axis a joint could actually push on), the
+parent's block not reduced, either pass dropping its link to the parent, the impulse's sign, the mass matrix without
+its inertia's off-diagonal, soft rows taken into trees, the exact solve never asked for, and tree rows swept and
+skipped at once (which hung, also a catch). Not caught: the rows' bias left out of the right-hand side (every row
+the trees take has none; kept, being the right formula), and the trees not interleaved by height, or solved in every
+sweep (both cost time only). A check that a tree has at most one joint held to the world was deleted: a second one is
+left with an empty diagonal block, which the factoring already refuses.
+
 ## Planned next
 
-To be decided.
+The contact solver across a colour, several contacts at a time (SIMD).

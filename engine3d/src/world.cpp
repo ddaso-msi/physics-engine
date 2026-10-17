@@ -172,7 +172,7 @@ void World::step(Real dt) {
     // 4-6. Forces, constraints, movement.
     for (Body& b : bodies)
         if (b.awake) b.integrate_velocity(dt, gravity, gyroscopic);
-    solve_constraints(bodies, contacts_, joints, dt, solver);
+    solve_constraints(bodies, contacts_, joints, dt, solver, &joint_solver_);
     lap(stats_.ms_solver);
     prev_pos_.resize(n);
     prev_q_.resize(n);

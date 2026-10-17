@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <vector>
 
 using namespace phys3d;
@@ -1048,4 +1050,170 @@ TEST(a_cone_leaves_twisting_about_the_axis_free) {
     CHECK_NEAR(w.joints[0].cone_tilt(w.bodies), 0.1, 0.01);
     const Vec3 along = rotate(w.bodies[0].q, {0, 1, 0});
     CHECK_NEAR(std::fabs(dot(w.bodies[0].w, along)), 6, 0.1);
+}
+
+// ---- joint trees, solved exactly (step 23) ----------------------------------------------------------
+
+namespace {
+
+struct Lcg {
+    std::uint32_t s = 1;
+    Real next() {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<Real>(s >> 8) / static_cast<Real>(1u << 24);
+    }
+    Real range(Real lo, Real hi) { return lo + (hi - lo) * next(); }
+    Vec3 in_box(Real r) { return {range(-r, r), range(-r, r), range(-r, r)}; }
+};
+
+// The largest speed left in any rigid row that holds both ways (the rows the trees solve), after `sweeps`
+// sweeps of the joint solver from the bodies' present velocities, with nothing carried over.
+Real worst_two_way_speed(std::vector<Body>& bodies, std::vector<Joint>& joints, int sweeps) {
+    JointSolver solver;
+    SolverSettings settings;
+    settings.warm_starting = false;
+    solver.prepare(bodies, joints, kDt, settings);
+    for (int i = 0; i < sweeps; ++i) solver.solve_velocity();
+    Real worst = 0;
+    for (const JointRow& r : solver.rows())
+        if (r.lower == -std::numeric_limits<Real>::infinity() && r.upper == std::numeric_limits<Real>::infinity() && r.softness == 0)
+            worst = std::max(worst, std::fabs(r.velocity() + r.bias));
+    return worst;
+}
+
+// A chain of `links` boxes along x, joined end to end by joints of every rigid kind in turn, the first held to
+// the world if `held`; each body given a velocity and spin of its own.
+void make_chain(std::vector<Body>& bodies, std::vector<Joint>& joints, int links, bool held, Lcg& rng) {
+    for (int i = 0; i < links; ++i) {
+        Body b = Body::solid_box({0.3f, 0.08f, 0.1f}, 1 + rng.range(0, 2), {0.6f * static_cast<Real>(i) + 0.3f, 0, 0});
+        b.vel = rng.in_box(2);
+        b.w = rng.in_box(3);
+        bodies.push_back(b);
+    }
+    for (int i = held ? 0 : 1; i < links; ++i) {
+        const int a = i - 1;
+        const Vec3 at{0.6f * static_cast<Real>(i), 0, 0};
+        switch (i % 4) {
+            case 0: joints.push_back(Joint::ball(bodies, a, i, at)); break;
+            case 1: joints.push_back(Joint::hinge(bodies, a, i, at, Vec3{0, 1, 1}.normalized())); break;
+            case 2: joints.push_back(Joint::weld(bodies, a, i, at)); break;
+            default: joints.push_back(Joint::slider(bodies, a, i, at, {1, 0, 0})); break;
+        }
+    }
+}
+
+Vec3 momentum(const std::vector<Body>& bodies) {
+    Vec3 p;
+    for (const Body& b : bodies) p += b.vel * b.mass;
+    return p;
+}
+Vec3 angular_momentum(const std::vector<Body>& bodies) {
+    Vec3 l;
+    for (const Body& b : bodies) l += cross(b.pos, b.vel * b.mass) + b.angular_momentum();
+    return l;
+}
+
+}  // namespace
+
+TEST(a_chain_of_every_rigid_joint_is_solved_exactly_in_one_sweep) {
+    // Ball, hinge, weld and slider joints, twelve links, held to the world at one end or free: one sweep of
+    // the joint solver leaves every two-way row still, where Gauss-Seidel, one row at a time, needs hundreds.
+    for (const bool held : {true, false}) {
+        Lcg rng;
+        std::vector<Body> bodies;
+        std::vector<Joint> joints;
+        make_chain(bodies, joints, 12, held, rng);
+        const Real exact = worst_two_way_speed(bodies, joints, 1);
+        CHECK(exact < 1e-4f);
+    }
+}
+
+TEST(a_branching_tree_of_joints_is_solved_exactly_in_one_sweep) {
+    // A ragdoll's shape: a torso with a welded head and four limbs of two links each, at the shoulders and hips
+    // ball joints, at the elbows and knees hinges. Held to nothing.
+    Lcg rng;
+    std::vector<Body> bodies;
+    std::vector<Joint> joints;
+    bodies.push_back(Body::solid_box({0.2f, 0.3f, 0.1f}, 1, {0, 0, 0}));
+    bodies.push_back(Body::solid_sphere(0.12f, 1, {0, 0.45f, 0}));
+    joints.push_back(Joint::weld(bodies, 0, 1, {0, 0.33f, 0}));
+    const Vec3 roots[4] = {{0.25f, 0.25f, 0}, {-0.25f, 0.25f, 0}, {0.12f, -0.3f, 0}, {-0.12f, -0.3f, 0}};
+    const Vec3 out[4] = {{1, 0, 0}, {-1, 0, 0}, {0, -1, 0}, {0, -1, 0}};
+    for (int limb = 0; limb < 4; ++limb) {
+        int previous = 0;
+        for (int k = 0; k < 2; ++k) {
+            const Vec3 start = roots[limb] + out[limb] * (0.3f * static_cast<Real>(k));
+            const int link = static_cast<int>(bodies.size());
+            bodies.push_back(Body::solid_capsule(0.1f, 0.05f, 1, start + out[limb] * 0.15f, Quat::from_axis_angle(cross({0, 1, 0}, out[limb]).length_sq() > 0 ? cross({0, 1, 0}, out[limb]).normalized() : Vec3{1, 0, 0}, kPi / 2)));
+            joints.push_back(k == 0 ? Joint::ball(bodies, previous, link, start) : Joint::hinge(bodies, previous, link, start, {0, 0, 1}));
+            previous = link;
+        }
+    }
+    for (Body& b : bodies) b.vel = rng.in_box(2), b.w = rng.in_box(3);
+    CHECK(worst_two_way_speed(bodies, joints, 1) < 1e-4f);
+}
+
+TEST(solving_a_free_tree_exactly_keeps_its_momentum) {
+    // The impulses a joint applies are equal and opposite, so whatever they come to, they cannot change a free
+    // structure's momentum, linear or angular.
+    Lcg rng;
+    std::vector<Body> bodies;
+    std::vector<Joint> joints;
+    make_chain(bodies, joints, 8, false, rng);
+    const Vec3 p = momentum(bodies), l = angular_momentum(bodies);
+    worst_two_way_speed(bodies, joints, 1);
+    CHECK(distance(momentum(bodies), p) < 1e-4f * (p.length() + 1));
+    CHECK(distance(angular_momentum(bodies), l) < 1e-4f * (l.length() + 1));
+}
+
+TEST(a_welded_cantilever_holds_its_shape) {
+    // Ten links welded end to end and to the world, sticking out sideways and a little down. Solved one row at a
+    // time, ten sweeps a step, it sagged (by 2 mm at the joints on average, 14 at worst); solved as a tree, it
+    // does not move.
+    World w;
+    const Vec3 lean = Vec3{1, -0.3f, 0}.normalized();
+    const Quat q = Quat::from_axis_angle(cross({0, -1, 0}, lean), std::acos(-lean.y));
+    int previous = -1;
+    for (int i = 0; i < 10; ++i) {
+        const int link = w.add(Body::solid_box({0.08f, 0.35f, 0.08f}, 1, lean * (0.35f + 0.7f * static_cast<Real>(i)), q));
+        w.add_joint(Joint::weld(w.bodies, previous, link, lean * (0.7f * static_cast<Real>(i))));
+        previous = link;
+    }
+    std::vector<Vec3> start;
+    for (const Body& b : w.bodies) start.push_back(b.pos);
+    run(w, 240);
+    for (size_t i = 0; i < w.bodies.size(); ++i) CHECK(distance(w.bodies[i].pos, start[i]) < 1e-4f);
+}
+
+TEST(joints_that_do_not_form_a_tree_are_still_solved_one_row_at_a_time) {
+    // Three structures the trees leave to Gauss-Seidel: a ring of four bodies (a loop), a bridge of six held to
+    // the world at both ends (a loop through the world), and a chain with a body that cannot turn about one axis
+    // (whose mass matrix has no inverse). Sweeping is slower but still gets there, and nothing goes wrong.
+    for (int kind = 0; kind < 3; ++kind) {
+        Lcg rng;
+        std::vector<Body> bodies;
+        std::vector<Joint> joints;
+        const int n = kind == 0 ? 4 : 6;
+        for (int i = 0; i < n; ++i) {
+            const Real angle = 2 * kPi * static_cast<Real>(i) / static_cast<Real>(n);
+            const Vec3 at = kind == 0 ? Vec3{std::cos(angle), std::sin(angle), 0} : Vec3{0.6f * static_cast<Real>(i) + 0.3f, 0, 0};
+            bodies.push_back(Body::solid_box({0.2f, 0.08f, 0.1f}, 1, at));
+            bodies.back().vel = rng.in_box(1);
+            bodies.back().w = rng.in_box(1);
+        }
+        if (kind == 2) bodies[2].inv_inertia_body = Mat3::diagonal(1, 1, 0);  // (cannot turn about z)
+        for (int i = 0; i < n; ++i) {
+            if (kind == 0) joints.push_back(Joint::ball(bodies, i, (i + 1) % n, (bodies[static_cast<size_t>(i)].pos + bodies[static_cast<size_t>((i + 1) % n)].pos) * 0.5f));
+            else joints.push_back(Joint::ball(bodies, i - 1, i, {0.6f * static_cast<Real>(i), 0, 0}));
+        }
+        if (kind == 1) joints.push_back(Joint::ball(bodies, n - 1, -1, {0.6f * static_cast<Real>(n), 0, 0}));
+        const Real locked_spin = bodies[2].w.z;  // (kind 2: about the axis that body cannot turn)
+        std::vector<Body> again = bodies;
+        const Real after_few = worst_two_way_speed(bodies, joints, 5);
+        const Real after_many = worst_two_way_speed(again, joints, 400);
+        CHECK(std::isfinite(after_few) && std::isfinite(after_many));
+        CHECK(after_many < 1e-3f);
+        CHECK(after_few > after_many);  // (it took sweeping: these were not solved in one go)
+        if (kind == 2) CHECK(again[2].w.z == locked_spin);  // no impulse turned it about its locked axis
+    }
 }
