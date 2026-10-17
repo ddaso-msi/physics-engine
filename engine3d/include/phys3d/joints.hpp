@@ -151,6 +151,9 @@ public:
     // One sweep over all rows, one at a time; then, if `exactly`, the rows of joints that form trees solved
     // exactly (step 23). The contact solver asks for that in its last sweep.
     void solve_velocity(bool exactly = true);
+    // Only the exact solve of the rows of joints that form trees (and their loops), with no sweep before it. The
+    // contact solver does this once, after its last sweep, so that the joints have the last word (step 30).
+    void solve_exactly();
     void store();          // saves the accumulated impulses back into the joints
     // Position pass (rows built with for_velocity false): corrects the rows of joints that form trees, all of a
     // tree at once (step 26), each error limited to `max_linear` or `max_angular`. `taken[j]` is set for each

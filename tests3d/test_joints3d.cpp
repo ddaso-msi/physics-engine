@@ -1182,7 +1182,11 @@ TEST(a_welded_cantilever_holds_its_shape) {
     std::vector<Vec3> start;
     for (const Body& b : w.bodies) start.push_back(b.pos);
     run(w, 240);
-    for (size_t i = 0; i < w.bodies.size(); ++i) CHECK(distance(w.bodies[i].pos, start[i]) < 1e-4f);
+    for (size_t i = 0; i < w.bodies.size(); ++i) {
+        CHECK(distance(w.bodies[i].pos, start[i]) < 1e-4f);
+        // and it is still, not sagging each step for the position pass to put back (step 26 would hide that)
+        CHECK(w.bodies[i].vel.length() < 1e-3f && w.bodies[i].w.length() < 1e-3f);
+    }
 }
 
 TEST(loops_of_joints_are_solved_exactly_and_a_body_that_cannot_turn_is_left_to_sweeping) {
@@ -1528,4 +1532,66 @@ TEST(a_damped_pendulum_loses_its_swing_and_stays_on_its_pin) {
     }
     CHECK(w.bodies[static_cast<size_t>(bob)].w.length() < 0.05f);  // its swing is gone
     CHECK(worst < 1e-4f);
+}
+
+// ---- the joints' last word (step 30) ----------------------------------------------------------------------
+//
+// (These two step at 120 Hz, as the demo does, not this file's 240: at twice the rate the impacts are gentler and
+// what they test hardly shows.)
+
+namespace {
+constexpr Real kDemoDt = 1.0f / 120.0f;
+}  // namespace
+
+TEST(a_rope_bridge_pressed_against_its_posts_does_not_open_its_joints) {
+    // A rope bridge between four posts that its end planks just touch, and crates dropped on it. The posts push on the
+    // end planks, and if the contacts had the last word in the velocity solve they pushed the end joints open (by 15
+    // mm here, closed again only by the position pass). Solved after the contacts, the joint trees hold them to a
+    // tenth of a millimetre throughout. (Without the posts the order made no difference: it is fixed bodies pushing
+    // back that the joints have to win against.)
+    World w;
+    const Real tilt = 0.32f, length = 0.55f;
+    Vec3 at{-4.2f, 4, 0};
+    const Real span = 16 * length * std::cos(tilt);
+    for (const Real x : {at.x, at.x + span})
+        for (const Real z : {-0.75f, 0.75f}) w.add(Body::fixed_box({0.15f, 2, 0.15f}, {x, 2, z}));  // (touching the planks' edges)
+    int previous = -1;
+    for (int i = 0; i < 16; ++i) {
+        const Real angle = i < 8 ? -tilt : tilt;
+        const Vec3 along{std::cos(angle), std::sin(angle), 0};
+        const int plank = w.add(Body::solid_box({length / 2, 0.04f, 0.6f}, 1, at + along * (length / 2), Quat::from_axis_angle({0, 0, 1}, angle)));
+        w.add_joint(Joint::hinge(w.bodies, previous, plank, at, {0, 0, 1}));
+        previous = plank;
+        at += along * length;
+    }
+    w.add_joint(Joint::hinge(w.bodies, previous, -1, at, {0, 0, 1}));
+    for (int i = 0; i < 5; ++i) w.add(Body::solid_box({0.3f, 0.3f, 0.3f}, 1, {-2.4f + 1.2f * static_cast<Real>(i), 5.5f + 0.8f * static_cast<Real>(i), 0}));
+    Real worst = 0;
+    for (int step = 0; step < 360; ++step) {
+        w.step(kDemoDt);
+        worst = std::max(worst, worst_gap(w.bodies, w.joints));
+    }
+    CHECK(worst < 1e-3f);  // (measured: 0.11 mm)
+}
+
+TEST(a_jointed_pair_fired_at_a_thin_wall_neither_goes_through_nor_comes_far_apart) {
+    // Two balls joined, fired at 300 m/s at a wall 10 cm thick: the sweep stops each short of it, pulling it back along
+    // its path, which opens the joint. The joint position pass runs after the sweep, and closes what it can; but
+    // closing it pulled the front ball into the wall, and on through it the next step, until the sweep is run again
+    // after the pass.
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    w.add(Body::fixed_box({0.05f, 2, 2}, {3, 0, 0}));
+    const int a = w.add(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
+    const int b = w.add(Body::solid_sphere(0.2f, 1, {-0.5f, 0, 0}));
+    w.add_joint(Joint::ball(w.bodies, a, b, {-0.25f, 0, 0}));
+    w.bodies[static_cast<size_t>(a)].vel = w.bodies[static_cast<size_t>(b)].vel = {300, 0, 0};
+    Real worst = 0;
+    for (int step = 0; step < 6; ++step) {
+        w.step(kDemoDt);
+        CHECK(w.bodies[static_cast<size_t>(a)].pos.x < 2.95f && w.bodies[static_cast<size_t>(b)].pos.x < 2.95f);  // never through
+        worst = std::max(worst, gap(w, 0));
+    }
+    CHECK(worst < 0.4f);  // (measured: 0.25 m; with the pass before the sweep, 0.5)
 }

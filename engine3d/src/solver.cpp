@@ -354,7 +354,7 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     }
 
     for (int sweep = 0; sweep < settings.iterations; ++sweep) {
-        joint_solver.solve_velocity(/*exactly=*/sweep == settings.iterations - 1);
+        joint_solver.solve_velocity(/*exactly=*/false);
         for (WideConstraint& w : wide) solve_wide(w);
         for (ContactConstraint& c : shared) {
             Motion m = c.load();
@@ -389,6 +389,11 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
         }
     }
 
+    // The joints that form trees, exactly, after everything: the last word. (In the last sweep and before the
+    // contacts, as it was, a hard landing's contact impulses came after it and opened the joints, by up to 2 cm on a
+    // rope bridge with crates dropped on it, and closed them only in the position pass; solved last, 0.1 mm. What
+    // it costs the contacts is a little of their closing speed, which the next step's push-out handles.)
+    joint_solver.solve_exactly();
     joint_solver.store();
     for (const WideConstraint& w : wide) unpack(w, contacts);
     for (const ContactConstraint& c : shared)

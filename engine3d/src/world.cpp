@@ -182,7 +182,6 @@ void World::step(Real dt) {
     }
     for (Body& b : bodies)
         if (b.awake) b.integrate_position(dt);
-    solve_joint_positions(bodies, joints, solver);
 
     lap(stats_.ms_movement);
 
@@ -192,6 +191,26 @@ void World::step(Real dt) {
     if (continuous) continuous_collision();
 
     lap(stats_.ms_sweep);
+
+    // 7b. The joint position pass, after the sweep (step 30): the sweep pulls a fast body back along its path with no
+    // thought for its joints, and done before it the pass left what the sweep opened (8 cm, once, on a ragdoll
+    // tumbling down steps) for the next step. (Counted with the movement.) But the pass knows nothing of walls either:
+    // closing a joint can pull a body the sweep had just stopped into a thin wall, from where it went on through. So
+    // the sweep is run again, from where each body began the step to where the joints have left it: what the pass
+    // put through a wall is stopped short of it (and a joint held open against a wall stays so, for the contacts to
+    // settle). A body already stopped the first time is not moved again: it is just short of the wall.
+    solve_joint_positions(bodies, joints, solver);
+    double joints_ms = 0;
+    lap(joints_ms);
+    stats_.ms_movement += joints_ms;
+    if (continuous && !joints.empty()) {
+        const size_t swept = stats_.ccd_swept;
+        continuous_collision();
+        stats_.ccd_swept = swept;  // (the same bodies, counted once)
+        double again_ms = 0;
+        lap(again_ms);
+        stats_.ms_sweep += again_ms;
+    }
 
     // 8. Sleep. A body is "still" while it is slower than both thresholds; an island sleeps when its most
     //    restless member has been still long enough.

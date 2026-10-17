@@ -1364,6 +1364,46 @@ after the joints and have the last word (solving the joint trees after them inst
 and continuous collision pulls a fast body back along its path without regard to its joints, after the joint position
 pass (with it off, a ragdoll's worst was 2.6 cm, not 8).
 
+## Step 30: the joints' last word
+
+Step 29 found joints opening by centimetres on impact and closing again. Three changes, each tested on its own:
+
+- **The joint trees are solved exactly after the contacts**, once, after the last sweep, not in the last sweep before
+  them. A joint pressed by a fixed body needs this: a rope bridge whose end planks just touch its posts, with crates
+  dropped on it, opened its end joints by 15 mm when the posts' contacts had the last word, and by 0.1 mm now. (Without
+  the posts the order made no difference: it is fixed bodies pushing back that joints have to win against.)
+- **The joint position pass runs after continuous collision**, not before. The sweep pulls a fast body back along its
+  path with no thought for its joints; run before it, the pass left what the sweep opened for the next step.
+- **And continuous collision runs a second time, after the position pass**, when there are joints. The first test of
+  the second change found it unsafe: two balls joined and fired at 300 m/s at a wall 10 cm thick were both stopped
+  short of it, the pass then closed their joint by pulling the front ball into the wall, and the next step it went on
+  through. Swept again from where each body began the step to where the joints left it, a body put through a wall is
+  stopped short of it, and one already stopped is not moved again (it is just short of the wall). The pair's joint is
+  left 0.25 m open after the impact instead of 0.5, and nothing goes through.
+
+| worst joint gap over the run | step 29 | step 30 |
+|---|---|---|
+| demo rope bridge, crates dropped on it | 13.5 mm | 0.17 mm |
+| demo ragdolls down the steps | 59 mm | 36 mm |
+
+What is left on the ragdolls is a joint at its limit, pressed into a step by contacts (a knee bent as far as it goes, its
+shin 2 cm into the step): the position pass closes the anchor and then turns the knee back to its limit, which opens the
+anchor again, and the second sweep can stop a limb the pass pulled into the step. Contacts, limits and anchors would have
+to be solved together to do better.
+
+Cost: the second sweep, only with joints and only for fast bodies: 0.06 ms a step in the chains benchmark at 1000 links.
+
+Also fixed in the demo: the ragdolls were dropped with the lowest one's legs inside the top step (a contact 40 cm deep),
+which accounted for much of what step 29 measured there; they now start clear of it.
+
+Tests (2, 294 in total, and one strengthened): the rope bridge between touching posts holds within 1 mm (it is stepped at
+120 Hz, as the demo is: at this file's 240 the impacts are gentler and the order hardly showed); the jointed pair fired
+at a thin wall never gets through it and is left less than 0.4 m apart. And the welded cantilever of step 23 must now
+also be still, not only in place: the position pass corrects a tree exactly since step 26, so a cantilever whose
+velocities sagged every step was put back every step and passed; with the velocity solve's exactness lost it now fails.
+Deliberate breakages: the exact solve back before the contacts, no exact velocity solve at all, the position pass back
+before the sweep, and no second sweep: each caught.
+
 ## Planned next
 
-The two orderings above.
+To be decided.

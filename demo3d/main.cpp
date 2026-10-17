@@ -340,9 +340,10 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
                 step.friction = 0.6f;
                 w.add(step);
             }
-            // (each pushed off the top step, down the flight)
+            // (each pushed off the top step, down the flight; the lowest with its feet, a metre and a half below its
+            // middle, just clear of the step)
             for (int i = 0; i < 3; ++i)
-                add_ragdoll(w, {-1.7f, 3.6f + 1.6f * static_cast<float>(i), -1.1f + 1.1f * static_cast<float>(i)}, {2.2f + 0.4f * static_cast<float>(i), 0, 0});
+                add_ragdoll(w, {-1.7f, 4.6f + 1.6f * static_cast<float>(i), -1.1f + 1.1f * static_cast<float>(i)}, {2.2f + 0.4f * static_cast<float>(i), 0, 0});
             cam.target = {0.5f, 1.5f, 0};
             cam.distance = 12;
             cam.yaw = 0.6f;

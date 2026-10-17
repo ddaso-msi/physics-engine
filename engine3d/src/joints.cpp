@@ -433,6 +433,8 @@ void JointSolver::solve_velocity(bool exactly) {
     if (exactly) trees_->solve(rows_);
 }
 
+void JointSolver::solve_exactly() { trees_->solve(rows_); }
+
 void JointSolver::correct_trees(std::vector<Body>& bodies, Real max_linear, Real max_angular, std::vector<std::uint8_t>& taken,
                                 std::vector<Real>& error) {
     std::vector<int> first = first_row_;
