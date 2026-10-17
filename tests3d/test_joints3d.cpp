@@ -306,6 +306,56 @@ TEST(the_position_pass_closes_a_gap_without_creating_motion) {
     for (const Body& body : w.bodies) CHECK(body.vel.length() == 0 && body.w.length() == 0);
 }
 
+TEST(one_correction_closes_an_anchor_gap_and_moves_no_centre_of_mass) {
+    // The position pass corrects an anchor's three rows as one (step 21): it solves for the push that closes
+    // the gap, the bodies' turning included, so one correction leaves only what the turning's curvature
+    // adds, (gap / lever)^2 of the lever (measured: 0.3% of the gap; row by row it was 2.9%). And it pushes
+    // the two bodies equally and oppositely, so their centre of mass stays where it was. (Not a hinge: its two
+    // turning rows come after the anchor and open it again by turning the bodies back, row by row or not.)
+    for (const JointType type : {JointType::Ball, JointType::Weld}) {
+        std::vector<Body> bodies;
+        bodies.push_back(Body::solid_box({0.1f, 0.3f, 0.2f}, 1, {0, 0, 0}, Quat::from_axis_angle({1, 2, 3}, 0.4f)));
+        bodies.push_back(Body::solid_box({0.2f, 0.1f, 0.3f}, 3, {0.5f, 0.2f, 0.1f}, Quat::from_axis_angle({3, 1, 2}, 0.7f)));
+        const Vec3 anchor{0.25f, 0.1f, 0.05f};
+        std::vector<Joint> joints{type == JointType::Ball ? Joint::ball(bodies, 0, 1, anchor) : Joint::weld(bodies, 0, 1, anchor)};
+        bodies[1].pos += Vec3{0.003f, -0.004f, 0.002f};  // pulled apart, not turned: the anchor is all that is wrong
+        const Real before = distance(joints[0].world_anchor_a(bodies), joints[0].world_anchor_b(bodies));
+        const Vec3 centre = (bodies[0].pos * bodies[0].mass + bodies[1].pos * bodies[1].mass) / (bodies[0].mass + bodies[1].mass);
+        SolverSettings once;
+        once.joint_position_iterations = 1;
+        solve_joint_positions(bodies, joints, once);
+        CHECK(distance(joints[0].world_anchor_a(bodies), joints[0].world_anchor_b(bodies)) < before * 0.01f);
+        const Vec3 now = (bodies[0].pos * bodies[0].mass + bodies[1].pos * bodies[1].mass) / (bodies[0].mass + bodies[1].mass);
+        CHECK(distance(now, centre) < 1e-6f);
+    }
+}
+
+TEST(a_badly_opened_anchor_is_eased_back_not_snapped) {
+    // An anchor a metre open closes by 20 cm per correction, as each row of a joint does.
+    std::vector<Body> bodies;
+    bodies.push_back(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
+    bodies.push_back(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
+    std::vector<Joint> joints{Joint::ball(bodies, 0, 1, {0, 0, 0})};  // anchored at both centres
+    bodies[1].pos = {1, 0, 0};
+    SolverSettings once;
+    once.joint_position_iterations = 1;
+    solve_joint_positions(bodies, joints, once);
+    CHECK_NEAR(distance(bodies[0].pos, bodies[1].pos), 0.8, 1e-5);
+}
+
+TEST(a_sleeping_joint_is_left_alone_even_when_open) {
+    World w;
+    const int bob = w.add(Body::solid_sphere(0.1f, 1, {0, -1, 0}));
+    w.add_joint(Joint::ball(w.bodies, -1, bob, {0, 0, 0}));
+    run(w, 240);
+    CHECK(!w.bodies[0].awake);  // hanging still: asleep
+    w.bodies[0].pos.x += 0.001f;  // moved without waking it
+    const Vec3 moved = w.bodies[0].pos;
+    run(w, 10);
+    CHECK(!w.bodies[0].awake);
+    CHECK(distance(w.bodies[0].pos, moved) == 0);
+}
+
 // ---- distance ------------------------------------------------------------------------------------
 
 TEST(a_rigid_distance_joint_holds_its_length) {

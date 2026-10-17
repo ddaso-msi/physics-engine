@@ -128,20 +128,25 @@ public:
     // Builds this step's rows from the bodies' current poses. `joints` and `bodies` must not be resized
     // until store() has been called. `for_velocity` false builds rows for the position pass: stored
     // impulses are left untouched.
+    // `only_row` (position pass only) builds just that one row of the joints' rows, in the order they would
+    // otherwise come; row_count() still says how many there are.
     void prepare(std::vector<Body>& bodies, std::span<Joint> joints, Real dt, const SolverSettings& settings,
-                 bool for_velocity = true);
+                 bool for_velocity = true, int only_row = -1);
     void warm_start();     // re-applies last step's impulses
     void solve_velocity(); // one sweep over all rows
     void store();          // saves the accumulated impulses back into the joints
 
     const std::vector<JointRow>& rows() const { return rows_; }
     std::vector<JointRow>& rows_mutable() { return rows_; }
+    int row_count() const { return counted_; }
 
 private:
     std::vector<JointRow> rows_;
     // Stands in for body index -1: immovable, at the origin, unrotated. Nothing can move it (it has no mass
     // to divide by), so it is made once, not each time the rows are.
     Body world_ = Body::fixed({});
+    int counted_ = 0;   // rows the last prepare() came to, built or not
+    JointRow skipped_;  // where the rows not asked for go
 };
 
 // Position correction, run after the bodies have moved: shifts positions and orientations directly to

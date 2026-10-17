@@ -1026,6 +1026,52 @@ where it is infinite; the leaves are there to keep the measure finite, and no sc
 A guard against a zero mark went the other way: its breakage survived because the mark can only be zero for a
 tree with no leaves, so it was deleted.
 
+## Step 21: the joint position pass
+
+After step 19 the chains scene spent more time in the joint position pass (0.74 ms for 1000 joints) than in
+the whole velocity solver. The pass corrects a joint one row at a time, measuring each afresh from where the
+last correction left the bodies (step 7: corrected together from one measurement, independent rows
+overshoot each other and never settle). Measuring meant calling `prepare` for the whole joint, every row of
+it, once per row: twelve thousand times a step for a thousand ball joints. Profiled, about 30 ns a time, of
+which turning the inertia into world space was only 4: the rest was measuring itself.
+
+Two small savings first: `prepare` can be asked for just one row (`only_row`), and a correction no longer
+turns a body that cannot move (it was renormalising the world stand-in's orientation). 0.67 to 0.62 ms.
+
+Then the real one. A ball, hinge or weld holds its two anchor points together with three rows, along the
+world axes, and those three are now corrected as one: measure the gap C = pb - pa once, and find the push P
+that closes it from the 3 x 3 matrix that says how the gap answers a push,
+
+    K = (1/ma + 1/mb) E - [ra] IA^-1 [ra] - [rb] IB^-1 [rb]        ([r] the matrix of r x),    P = -K^-1 C,
+
+applied to both bodies equally and oppositely (so no centre of mass moves), at most 20 cm at a time as
+before. This is not "correcting all together from one measurement" in step 7's sense: K couples the three
+rows exactly, where the rows one at a time see each other only through what they have already moved.
+Measured, two free bodies pulled 5 mm apart:
+
+| joint | one pass, row by row | one pass, as one | four passes, row by row | four, as one |
+|---|---|---|---|---|
+| ball | 2.9% of the gap left | 0.31% | 2.4 * 10^-7 m | 8 * 10^-9 m |
+| weld | 2.9% | 0.31% | 2.9 * 10^-5 m | 6 * 10^-8 m |
+| hinge | 23% | 23% | 5.2 * 10^-5 m | 5.2 * 10^-5 m |
+
+(A hinge's two turning rows come after its anchor and open it again as they turn the bodies back, whichever
+way the anchor was closed.) In the chains scene, over seven seconds, the joints are held about twice as
+tightly: mean gap 0.20 to 0.11 mm, 99th percentile 0.77 to 0.50 mm, worst 3.1 to 2.1 mm. And faster:
+
+| chains | position pass and movement | step |
+|---|---|---|
+| 250 | 0.19 to 0.08 ms | 0.31 to 0.21 ms |
+| 1000 | 0.74 to 0.34 | 1.37 to 0.98 |
+| 2000 | 1.48 to 0.66 | 3.01 to 2.16 |
+
+Tests (3, 271 in total): one correction closes a ball's or a weld's anchor gap to under 1% and moves no centre
+of mass; an anchor a metre open closes 20 cm per correction; a sleeping joint is left alone even when moved
+open. Deliberate breakages: 12, 9 caught (all three of the new tests were written for ones that at first were
+not). Not caught: a weld's anchor corrected before its turning rows rather than after (an order), a hinge's
+anchor corrected row by row as before (no difference measured, above), and corrections moving bodies that
+cannot move (the same result).
+
 ## Planned next
 
 To be decided.

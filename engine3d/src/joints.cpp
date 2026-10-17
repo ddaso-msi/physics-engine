@@ -122,26 +122,67 @@ void apply_impulse(JointRow& r, Real lambda) {
     r.b->w += r.inv_i_ang_b * lambda;
 }
 
-// The same push applied to POSES instead: M^-1 J^T lambda read as a displacement and a small rotation.
+// A joint takes part in solving unless all its bodies are asleep or fixed.
+bool is_live(const std::vector<Body>& bodies, const Joint& j) {
+    return (j.a >= 0 && bodies[static_cast<size_t>(j.a)].is_active()) || (j.b >= 0 && bodies[static_cast<size_t>(j.b)].is_active());
+}
+
+// The position pass for a joint's anchor point (ball, hinge and weld): the three rows that hold the two anchors
+// together, corrected as one. The gap C = pb - pa is measured once, and the push P that closes it is found
+// from the 3 x 3 matrix K that says how the gap answers a push:
+//     a push P on b at its anchor (and -P on a) moves the gap by  K P,
+//     K = (1/ma + 1/mb) E - [ra] IA^-1 [ra] - [rb] IB^-1 [rb]       ([r] the matrix of r x)
+// so P = -K^-1 C. The three rows one at a time, each measured afresh, come to the same answer only in the limit:
+// each sees the others' rows only through what they have already moved. (Step 21.)
+void correct_anchor(std::vector<Body>& bodies, const Joint& j) {
+    Body* A = j.a < 0 ? nullptr : &bodies[static_cast<size_t>(j.a)];
+    Body* B = j.b < 0 ? nullptr : &bodies[static_cast<size_t>(j.b)];
+    const Vec3 ra = A ? rotate(A->q, j.local_anchor_a) : Vec3{}, rb = B ? rotate(B->q, j.local_anchor_b) : Vec3{};
+    const Vec3 pa = A ? A->pos + ra : j.local_anchor_a, pb = B ? B->pos + rb : j.local_anchor_b;
+    Vec3 C = pb - pa;
+    const Real gap = C.length();
+    if (gap == 0) return;
+    if (gap > kMaxLinearCorrection) C = C * (kMaxLinearCorrection / gap);
+    const bool a_moves = A && A->type == BodyType::Dynamic, b_moves = B && B->type == BodyType::Dynamic;
+    const Mat3 inv_ia = a_moves ? A->inv_inertia_world() : Mat3::diagonal(0, 0, 0);
+    const Mat3 inv_ib = b_moves ? B->inv_inertia_world() : Mat3::diagonal(0, 0, 0);
+    const Real ma = a_moves ? A->inv_mass : 0, mb = b_moves ? B->inv_mass : 0;
+    const Mat3 K = Mat3::identity() * (ma + mb) - Mat3::skew(ra) * inv_ia * Mat3::skew(ra) - Mat3::skew(rb) * inv_ib * Mat3::skew(rb);
+    const Vec3 P = K.inverse() * -C;
+    if (a_moves) {
+        A->pos -= P * ma;
+        A->q = integrate_orientation(A->q, -(inv_ia * cross(ra, P)), 1);
+    }
+    if (b_moves) {
+        B->pos += P * mb;
+        B->q = integrate_orientation(B->q, inv_ib * cross(rb, P), 1);
+    }
+}
+
+// The same push applied to POSES instead: M^-1 J^T lambda read as a displacement and a small rotation. (Not
+// to a body that cannot move: for one, both are zero, and turning it by nothing would only renormalise it.)
 void apply_displacement(JointRow& r, Real lambda) {
-    r.a->pos += r.lin_a * (r.a->inv_mass * lambda);
-    r.a->q = integrate_orientation(r.a->q, r.inv_i_ang_a * lambda, 1);
-    r.b->pos += r.lin_b * (r.b->inv_mass * lambda);
-    r.b->q = integrate_orientation(r.b->q, r.inv_i_ang_b * lambda, 1);
+    if (r.a->type == BodyType::Dynamic) {
+        r.a->pos += r.lin_a * (r.a->inv_mass * lambda);
+        r.a->q = integrate_orientation(r.a->q, r.inv_i_ang_a * lambda, 1);
+    }
+    if (r.b->type == BodyType::Dynamic) {
+        r.b->pos += r.lin_b * (r.b->inv_mass * lambda);
+        r.b->q = integrate_orientation(r.b->q, r.inv_i_ang_b * lambda, 1);
+    }
 }
 
 }  // namespace
 
 void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Real dt, const SolverSettings& s,
-                          bool for_velocity) {
+                          bool for_velocity, int only_row) {
     rows_.clear();
+    counted_ = 0;
 
     // A joint whose bodies are all asleep (or fixed) has nothing to do; its stored impulses wait. The rest are
     // taken colour by colour (see solving_order.hpp), unless there is only one: the position pass prepares
     // one joint at a time, many times a step, and has no order to choose.
-    auto live = [&](const Joint& j) {
-        return (j.a >= 0 && bodies[static_cast<size_t>(j.a)].is_active()) || (j.b >= 0 && bodies[static_cast<size_t>(j.b)].is_active());
-    };
+    auto live = [&](const Joint& j) { return is_live(bodies, j); };
     const bool coloured = joints.size() > 1;
     std::vector<size_t> order;
     if (coloured) order = solving_order(bodies, joints.size(), [&](size_t i, int& a, int& b) {
@@ -166,6 +207,8 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
         // allowance); `error` is the position error it measures, for the position pass.
         auto add = [&](int slot, Vec3 lin_a, Vec3 ang_a, Vec3 lin_b, Vec3 ang_b, Real bias, Real lower = -kInf,
                        Real upper = kInf, Real error = 0) -> JointRow& {
+            if (only_row >= 0 && counted_++ != only_row) return skipped_;
+            if (only_row < 0) ++counted_;
             JointRow r;
             r.a = A;
             r.b = B;
@@ -358,14 +401,24 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
             // its bodies, so correcting one changes the error of the others: closing a hinge's point turns
             // the body, which changes its angle, and turning it back to a limit moves the point. Corrected
             // all together from one measurement they overshoot against each other and never settle.
-            // (The rows are measured afresh before each, but not once more after the last: a joint has the
-            // same rows whatever its pose, except that a ball joint's cone row is left out while the two axes
-            // are exactly in line, and a row added that way would have no error to correct.)
-            solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
-            for (size_t k = 0; k < solver.rows().size(); ++k) {
-                if (k > 0) solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false);
-                if (k >= solver.rows().size()) break;
-                JointRow& r = solver.rows_mutable()[k];
+            // Each row is measured afresh, and only that row is built. (Not once more after the last: a joint
+            // has the same rows whatever its pose, except that a ball joint's cone row is left out while the
+            // two axes are exactly in line, and a row added that way would have no error to correct.) The
+            // exception is the three rows of an anchor point, corrected together (correct_anchor, above), in
+            // the place they have among the joint's rows.
+            const int anchor_rows = joint.type == JointType::Ball || joint.type == JointType::Hinge ? 0 : joint.type == JointType::Weld ? 3 : -1;
+            if (anchor_rows >= 0 && !is_live(bodies, joint)) continue;
+            int rows = anchor_rows >= 0 ? anchor_rows + 3 + 1 : 1;  // (until a prepare says how many there are)
+            for (int k = 0; k < rows; ++k) {
+                if (k == anchor_rows) {
+                    correct_anchor(bodies, joint);
+                    k += 2;
+                    continue;
+                }
+                solver.prepare(bodies, std::span<Joint>(&joint, 1), 1, settings, /*for_velocity=*/false, k);
+                rows = solver.row_count();
+                if (solver.rows().empty()) break;
+                JointRow& r = solver.rows_mutable()[0];
                 if (r.error == 0 || r.mass <= 0) continue;
                 const bool angular_only = r.lin_a.length_sq() == 0 && r.lin_b.length_sq() == 0;
                 const Real limit = angular_only ? kMaxAngularCorrection : kMaxLinearCorrection;
