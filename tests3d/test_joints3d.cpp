@@ -18,6 +18,7 @@ void run(World& w, int steps, Real dt = kDt) {
     for (int i = 0; i < steps; ++i) w.step(dt);
 }
 // Distance between a joint's two anchors: how far a pin joint has come apart.
+Real gap_between(const std::vector<Body>& bodies, const Joint& j) { return distance(j.world_anchor_a(bodies), j.world_anchor_b(bodies)); }
 Real gap(const World& w, int joint) {
     const Joint& j = w.joints[static_cast<size_t>(joint)];
     return distance(j.world_anchor_a(w.bodies), j.world_anchor_b(w.bodies));
@@ -311,7 +312,8 @@ TEST(one_correction_closes_an_anchor_gap_and_moves_no_centre_of_mass) {
     // the gap, the bodies' turning included, so one correction leaves only what the turning's curvature
     // adds, (gap / lever)^2 of the lever (measured: 0.3% of the gap; row by row it was 2.9%). And it pushes
     // the two bodies equally and oppositely, so their centre of mass stays where it was. (Not a hinge: its two
-    // turning rows come after the anchor and open it again by turning the bodies back, row by row or not.)
+    // turning rows come after the anchor and open it again by turning the bodies back, row by row or not.
+    // Solving them together with the anchor closes it, but holds colliding chains worse; see step 22.)
     for (const JointType type : {JointType::Ball, JointType::Weld}) {
         std::vector<Body> bodies;
         bodies.push_back(Body::solid_box({0.1f, 0.3f, 0.2f}, 1, {0, 0, 0}, Quat::from_axis_angle({1, 2, 3}, 0.4f)));
@@ -331,16 +333,45 @@ TEST(one_correction_closes_an_anchor_gap_and_moves_no_centre_of_mass) {
 }
 
 TEST(a_badly_opened_anchor_is_eased_back_not_snapped) {
-    // An anchor a metre open closes by 20 cm per correction, as each row of a joint does.
+    // An anchor a metre open closes by 20 cm per correction, as each row of a joint does, whatever the joint.
+    for (const JointType type : {JointType::Ball, JointType::Hinge, JointType::Weld}) {
+        std::vector<Body> bodies;
+        bodies.push_back(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
+        bodies.push_back(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
+        std::vector<Joint> joints{type == JointType::Ball    ? Joint::ball(bodies, 0, 1, {0, 0, 0})  // anchored at both centres
+                                  : type == JointType::Hinge ? Joint::hinge(bodies, 0, 1, {0, 0, 0}, {0, 0, 1})
+                                                             : Joint::weld(bodies, 0, 1, {0, 0, 0})};
+        bodies[1].pos = {1, 0, 0};
+        SolverSettings once;
+        once.joint_position_iterations = 1;
+        solve_joint_positions(bodies, joints, once);
+        CHECK_NEAR(distance(bodies[0].pos, bodies[1].pos), 0.8, 1e-5);
+    }
+}
+
+TEST(the_position_pass_brings_a_bent_cone_back_a_step_at_a_time) {
+    // A ball joint whose cone allows 0.3 rad, bent to 0.6: one correction brings it back by at most the
+    // 0.14 rad any turning row may take at once, and four of them, over the limit no more.
     std::vector<Body> bodies;
-    bodies.push_back(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
-    bodies.push_back(Body::solid_sphere(0.2f, 1, {0, 0, 0}));
-    std::vector<Joint> joints{Joint::ball(bodies, 0, 1, {0, 0, 0})};  // anchored at both centres
-    bodies[1].pos = {1, 0, 0};
+    bodies.push_back(Body::solid_box({0.1f, 0.4f, 0.1f}, 1, {0, 0, 0}));
+    bodies.push_back(Body::solid_box({0.1f, 0.4f, 0.1f}, 1, {0, -0.8f, 0}));
+    Joint shoulder = Joint::ball(bodies, 0, 1, {0, -0.4f, 0});
+    shoulder.enable_cone = true;
+    shoulder.cone_angle = 0.3f;
+    const Vec3 pivot{0, -0.4f, 0};
+    const Quat bend = Quat::from_axis_angle({0, 0, 1}, 0.6f);  // b swung 0.6 rad about the anchor
+    bodies[1].q = bend;
+    bodies[1].pos = pivot + rotate(bend, Vec3{0, -0.4f, 0});
+    std::vector<Joint> joints{shoulder};
+    CHECK_NEAR(joints[0].cone_tilt(bodies), 0.6, 1e-4);
     SolverSettings once;
     once.joint_position_iterations = 1;
     solve_joint_positions(bodies, joints, once);
-    CHECK_NEAR(distance(bodies[0].pos, bodies[1].pos), 0.8, 1e-5);
+    const Real tilt = joints[0].cone_tilt(bodies);
+    CHECK(tilt < 0.6f - 0.1f && tilt > 0.6f - 0.15f);
+    solve_joint_positions(bodies, joints, SolverSettings{});
+    CHECK(joints[0].cone_tilt(bodies) < 0.3f + 1e-3f);
+    CHECK(gap_between(bodies, joints[0]) < 1e-4f);
 }
 
 TEST(a_sleeping_joint_is_left_alone_even_when_open) {

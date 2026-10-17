@@ -1072,6 +1072,46 @@ not). Not caught: a weld's anchor corrected before its turning rows rather than 
 anchor corrected row by row as before (no difference measured, above), and corrections moving bodies that
 cannot move (the same result).
 
+## Step 22: a hinge's turning rows as a block (tried, and not kept)
+
+Step 21 left a hinge's two turning rows one at a time, after its anchor, and they open the anchor again (23% of
+a 5 mm gap left after one pass). The obvious next move was to solve more of a joint at once. Built and measured:
+every row of a joint that holds both ways (all but limits, the cone and motors) corrected together, K = J M^-1 J^T
+solved by Cholesky, with the one-sided rows after it one at a time, a fallback to rows one at a time when K is
+singular, and the ball joint's closed-form anchor kept as a fast path. On two bodies it does what it promises:
+
+| one pass, 5 mm gap | step 21 | all two-way rows as one |
+|---|---|---|
+| hinge | 23% left | 0.25% |
+| weld | 0.31% | 0.18% |
+
+and on a single hinge chain swinging alone it is the same as step 21. But in the benchmark's chains scene with
+hinges (or welds) in place of ball joints, where chains strike each other, it holds the joints worse:
+
+| 1000 links, seconds 1 to 8 | step 20 | step 21 | all as one | anchor, then the two turning rows as a 2 x 2 block |
+|---|---|---|---|---|
+| hinge chains: mean gap | 0.28 mm | 0.23 | 0.78 | 0.62 |
+| hinge chains: joint-steps over 1 cm | 0 | 0 | 0.9% | 0.36% |
+| weld chains: mean gap | 3.9 mm | 3.7 | 7.8 | |
+| weld chains: worst | 5.5 cm | 4.2 | 20 | |
+
+Re-closing the anchor after the block did not help (0.77 mm), so it is not the anchor: it is correcting a joint's
+turning rows together. Every solve was well conditioned (no fallbacks in 3.8 million) and fewer than 0.2% of them
+had an error past its limit. The likeliest reading is that the coupled solve turns a thin link through the
+rotation that is cheapest for it, about its own long axis, and the next joint's axis turns with it; one row at a
+time the turns are smaller and disturb the neighbours less. Whatever the reason, it is measured, so step 21's pass
+stays. Step 21 itself was re-checked against step 20 on the same hinge and weld chains (above): as good or
+better, at half the cost.
+
+Two tests written for it are kept, because they hold for step 21's pass as well and cover what nothing did: an
+anchor a metre open closes 20 cm per correction for hinges and welds too, not only balls; and a ball joint bent
+0.6 rad past a 0.3 rad cone comes back 0.14 rad per correction and settles inside it (leaving the cone's error out
+of the position pass was caught before only by a test of the row's derivative). 272 tests in total.
+
+Also seen: welded chains are held poorly whatever the pass (a mean gap of 4 mm, the worst 4 cm, when ten links
+welded end to end and leaning collide with their neighbours). That is the case for a different method (solving a
+whole chain, not a joint, at once) and is left open.
+
 ## Planned next
 
 To be decided.
