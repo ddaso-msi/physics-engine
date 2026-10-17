@@ -43,10 +43,10 @@ enum class JointType {
 struct Joint {
     // One slot per row a joint can produce, so a row keeps its accumulated impulse from step to step even
     // when its neighbours (a limit that is not currently reached) come and go.
-    //   Distance: 0.   Ball: 0-2 the point, 3 the cone.   Hinge: 0-2 the point, 3-4 the axis, 5 the motor,
-    //   6-7 the limits.   Weld: 0-2 the point, 3-5 the orientation.   Slider: 0-1 across the axis, 2-4 the
-    //   orientation, 5 the motor, 6-7 the limits.
-    static constexpr int kMaxRows = 8;
+    //   Distance: 0.   Ball: 0-2 the point, 3 the cone, 5-7 damping.   Hinge: 0-2 the point, 3-4 the axis,
+    //   5 the motor, 6-7 the limits, 8 damping.   Weld: 0-2 the point, 3-5 the orientation.   Slider: 0-1
+    //   across the axis, 2-4 the orientation, 5 the motor, 6-7 the limits, 8 damping.
+    static constexpr int kMaxRows = 9;
 
     JointType type = JointType::Distance;
     int a = -1, b = -1;  // body indices; -1 means "the fixed world" (anchors are then world coordinates)
@@ -77,6 +77,12 @@ struct Joint {
 
     // Weld and Slider: the orientation of b as seen from a when the joint was made, which they keep.
     Quat relative_orientation;
+
+    // Ball, Hinge, Slider: viscous damping of the motion the joint allows (step 29), a torque or force against it
+    // in proportion to its speed: for a ball or a hinge, -damping times the relative angular velocity (N m s), for
+    // a slider -damping times the speed along the rail (N s/m). Applied implicitly, so any amount is stable; a lot
+    // of it simply holds the joint still. (A spring's own damping is damping_ratio, above.)
+    Real damping = 0;
 
     // Ball: optionally keep b's copy of an axis within `cone_angle` of a's copy (a shoulder that cannot bend
     // back on itself). Turning ABOUT the axis is not limited. Set with limit_cone().

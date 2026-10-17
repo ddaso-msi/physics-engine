@@ -367,6 +367,31 @@ void JointSolver::prepare(std::vector<Body>& bodies, std::span<Joint> joints, Re
                 break;
             }
         }
+
+        // Damping (step 29): rows that drive the motion the joint allows towards zero, made soft so that what
+        // they apply is -damping times the speed it leaves, implicitly. With K a row's effective inverse mass,
+        // a soft row settles at lambda = -(J v) / gamma, which for gamma = 1 / (damping dt) is the impulse
+        // -damping dt (J v): the viscous torque (or force) over the step, at the step's end speed. Being soft,
+        // they are no part of the trees' exact solve (Gauss-Seidel does them), and they have nothing for the
+        // position pass to correct.
+        if (j.damping > 0 && (j.type == JointType::Ball || j.type == JointType::Hinge || j.type == JointType::Slider)) {
+            const Real gamma = 1 / (j.damping * dt);
+            auto soften = [&](JointRow& r) {
+                if (r.mass <= 0) return;
+                const Real m = r.mass;
+                r.softness = gamma;
+                r.mass = 1 / (1 / m + gamma);
+            };
+            const Vec3 a1 = rotate(A->q, j.local_axis_a);
+            if (j.type == JointType::Ball) {  // all three ways of turning
+                const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+                for (int i = 0; i < 3; ++i) soften(add(5 + i, {}, -axes[i], {}, axes[i], 0));
+            } else if (j.type == JointType::Hinge) {  // about the axis
+                soften(add(8, {}, -a1, {}, a1, 0));
+            } else {  // along the rail (the slider's row along its axis, as its motor's)
+                soften(add(8, -a1, -cross(ra + (pb - pa), a1), a1, cross(rb, a1), 0));
+            }
+        }
     }
     if (for_velocity) {
         first_row_.push_back(static_cast<int>(rows_.size()));

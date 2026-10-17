@@ -1329,6 +1329,41 @@ faults: the bridge is still swinging, slowly, after ten seconds, and a ragdoll's
 ground on its neck, because nothing in the engine damps a swing or a roll (there is no joint damping or rolling
 resistance), so neither falls asleep for a long while.
 
+## Step 29: joint damping
+
+Nothing in the engine slowed a joint's swing: a ragdoll's head rocked on its neck and a bridge swayed for as long as one
+cared to watch, and so neither fell asleep. `Joint::damping` now adds viscous damping to the motion a joint allows: a
+torque of -damping times the relative angular velocity for a ball (about all three axes) or a hinge (about its axis), a
+force of -damping times the sliding speed for a slider. It is taken implicitly, as a soft row with target speed zero and
+softness gamma = 1 / (damping dt) (the form the distance spring already uses): such a row settles at lambda =
+-(J v) / gamma = -damping dt (J v), the damping impulse over the step at the speed the step ends with, and so any amount
+is stable (a great deal simply holds the joint still). Being soft, the rows are left to Gauss-Seidel by the trees, and
+have nothing for the position pass to correct. A hinge and a slider already had eight rows' worth of impulse slots, so
+there are now nine.
+
+In the demo, the ragdolls' joints are damped (0.02 N m s at neck, shoulders and hips, 0.01 at elbows and knees: the parts
+weigh grams at density 1) and they come to rest and fall asleep about six seconds after being pushed (twenty without:
+damped three times less, ten); the rope bridge's hinges are damped (0.012), and it still sways for a long while: its
+slowest swing carries much more than the hinges take out each time, and its peak speed comes down only slowly through
+the sleep threshold. The welded rods are left undamped, swinging being the point of them.
+
+Tests (6, 292 in total): a wheel on a damped hinge, a ball on a damped ball joint (spun about a tilted axis) and a carriage
+on a damped slider each slow exactly as implicit damping says, w0 / (1 + c dt / I)^n; damping between two free bodies, by
+a ball, a hinge or a slider anchored away from both centres, keeps their momentum and angular momentum; a motor against
+damping settles where its torque runs out (w = torque / c); a damped pendulum loses its swing and stays on its pin.
+Deliberate breakages: 7; caught: no damping rows, gamma upside down, rows rigid not soft, a ball damped about one axis,
+a slider's row without its turning part, damping pushing both bodies the same way (the last two only once the momentum
+test had joints between free bodies, anchored off centre; with one end on the world they changed nothing). Not caught: a
+hinge's damping row in the motor's impulse slot (they share what is kept for the warm start; the motor test settles the
+same either way).
+
+**Seen while setting it up, and next.** The worst gap between a joint's anchors over a whole run is not the steady value
+the demo shows: in the first seconds, while crates land on the bridge and ragdolls hit the steps, joints open by up to
+2 cm on the bridge and 10 cm on a ragdoll, and close again. Two causes, measured: in the last sweep the contacts are solved
+after the joints and have the last word (solving the joint trees after them instead takes the bridge's worst to 0.1 mm);
+and continuous collision pulls a fast body back along its path without regard to its joints, after the joint position
+pass (with it off, a ragdoll's worst was 2.6 cm, not 8).
+
 ## Planned next
 
-To be decided.
+The two orderings above.

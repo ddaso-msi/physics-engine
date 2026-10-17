@@ -1421,3 +1421,111 @@ TEST(a_joint_given_twice_is_no_trouble) {
     CHECK(std::isfinite(left) && left < 1e-4f);
     CHECK(std::isfinite(bodies[0].vel.x) && bodies[0].vel.length() < 10);
 }
+
+// ---- damping (step 29) ---------------------------------------------------------------------------------
+
+TEST(a_damped_hinge_slows_a_wheel_exactly_as_implicit_damping_says) {
+    // A ball spinning on a hinge through its centre, weightless. The damping torque is -c w, taken implicitly:
+    // each step w becomes w / (1 + c dt / I), so after n steps w0 / (1 + c dt / I)^n (and close to w0 e^(-c t / I)).
+    World w;
+    w.gravity = {};
+    const int wheel = w.add(Body::solid_sphere(0.5f, 2, {0, 2, 0}));
+    Joint axle = Joint::hinge(w.bodies, -1, wheel, {0, 2, 0}, {0, 0, 1});
+    axle.damping = 0.3f;
+    w.add_joint(axle);
+    w.allow_sleep = false;
+    w.bodies[static_cast<size_t>(wheel)].w = {0, 0, 10};
+    const double I = 0.4 * w.bodies[static_cast<size_t>(wheel)].mass * 0.25;
+    const int steps = 240;
+    run(w, steps);
+    const double expected = 10 / std::pow(1 + 0.3 * kDt / I, steps);
+    CHECK_NEAR(w.bodies[static_cast<size_t>(wheel)].w.z, expected, 1e-3 * expected);
+    CHECK_NEAR(w.bodies[static_cast<size_t>(wheel)].w.z, 10 * std::exp(-0.3 * steps * kDt / I), 0.02 * expected);
+}
+
+TEST(a_damped_ball_joint_slows_spin_about_every_axis_alike) {
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    const int ball = w.add(Body::solid_sphere(0.4f, 3, {0, 1, 0}));
+    Joint socket = Joint::ball(w.bodies, -1, ball, {0, 1, 0});
+    socket.damping = 0.2f;
+    w.add_joint(socket);
+    const Vec3 spin{3, -5, 2};
+    w.bodies[static_cast<size_t>(ball)].w = spin;
+    const double I = 0.4 * w.bodies[static_cast<size_t>(ball)].mass * 0.16;
+    run(w, 120);
+    const Real factor = static_cast<Real>(1 / std::pow(1 + 0.2 * kDt / I, 120));
+    CHECK(distance(w.bodies[static_cast<size_t>(ball)].w, spin * factor) < 1e-3f * spin.length() * factor);
+}
+
+TEST(a_damped_slider_slows_a_carriage_exactly_as_implicit_damping_says) {
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    const int carriage = w.add(Body::solid_box({0.3f, 0.2f, 0.2f}, 1, {0, 1, 0}));
+    Joint rail = Joint::slider(w.bodies, -1, carriage, {0, 1, 0}, {1, 0, 0});
+    rail.damping = 1.5f;
+    w.add_joint(rail);
+    w.bodies[static_cast<size_t>(carriage)].vel = {4, 0, 0};
+    const double m = w.bodies[static_cast<size_t>(carriage)].mass;
+    run(w, 120);
+    const double expected = 4 / std::pow(1 + 1.5 * kDt / m, 120);
+    CHECK_NEAR(w.bodies[static_cast<size_t>(carriage)].vel.x, expected, 1e-3 * expected);
+}
+
+TEST(damping_between_two_free_bodies_keeps_their_momentum) {
+    // The damping torque (or force) acts on both bodies, equal and opposite, through the joint: whatever it does to
+    // their motion relative to each other, it cannot change the pair's momentum or angular momentum. For a ball, a
+    // hinge and a slider, anchored away from both bodies' centres.
+    for (const JointType type : {JointType::Ball, JointType::Hinge, JointType::Slider}) {
+        std::vector<Body> bodies;
+        bodies.push_back(Body::solid_box({0.3f, 0.2f, 0.1f}, 1, {0, 0, 0}));
+        bodies.push_back(Body::solid_box({0.2f, 0.4f, 0.2f}, 2, {0.6f, 0.1f, 0}));
+        bodies[0].vel = {1, 0, 0}, bodies[0].w = {0, 4, -2};
+        bodies[1].vel = {0, -1, 0.5f}, bodies[1].w = {3, 0, 1};
+        const Vec3 anchor{0.3f, 0.15f, 0.05f}, axis = Vec3{1, 1, 0}.normalized();
+        Joint j = type == JointType::Ball ? Joint::ball(bodies, 0, 1, anchor) : type == JointType::Hinge ? Joint::hinge(bodies, 0, 1, anchor, axis) : Joint::slider(bodies, 0, 1, anchor, axis);
+        j.damping = 5;
+        std::vector<Joint> joints{j};
+        const Vec3 p = momentum(bodies), l = angular_momentum(bodies);
+        JointSolver solver;
+        solver.prepare(bodies, joints, kDt, SolverSettings{});
+        for (int i = 0; i < 10; ++i) solver.solve_velocity(i == 9);
+        CHECK(distance(momentum(bodies), p) < 1e-4f);
+        CHECK(distance(angular_momentum(bodies), l) < 1e-4f * (l.length() + 1));
+    }
+}
+
+TEST(a_motor_against_damping_settles_where_its_torque_runs_out) {
+    // A wheel driven by a motor asking for 20 rad/s with at most 1 N m, against damping of 0.1 N m s: the motor
+    // cannot get there, and the wheel settles where the damping torque c w equals what the motor has, w = 10 rad/s.
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    const int wheel = w.add(Body::solid_sphere(0.3f, 1, {0, 1, 0}));
+    Joint axle = Joint::hinge(w.bodies, -1, wheel, {0, 1, 0}, {0, 0, 1});
+    axle.enable_motor = true;
+    axle.motor_speed = 20;
+    axle.max_motor = 1;
+    axle.damping = 0.1f;
+    w.add_joint(axle);
+    run(w, 1200);
+    CHECK_NEAR(w.bodies[static_cast<size_t>(wheel)].w.z, 10, 0.05);
+}
+
+TEST(a_damped_pendulum_loses_its_swing_and_stays_on_its_pin) {
+    World w;
+    w.allow_sleep = false;
+    const int bob = w.add(Body::solid_box({0.1f, 0.4f, 0.1f}, 1, {0.4f * std::sin(0.8f), 3 - 0.4f * std::cos(0.8f), 0}, Quat::from_axis_angle({0, 0, 1}, 0.8f)));
+    Joint pin = Joint::ball(w.bodies, -1, bob, {0, 3, 0});
+    pin.damping = 0.05f;
+    w.add_joint(pin);
+    Real worst = 0;
+    for (int i = 0; i < 1200; ++i) {
+        w.step(kDt);
+        worst = std::max(worst, gap(w, 0));
+    }
+    CHECK(w.bodies[static_cast<size_t>(bob)].w.length() < 0.05f);  // its swing is gone
+    CHECK(worst < 1e-4f);
+}

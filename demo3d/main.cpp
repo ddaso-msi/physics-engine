@@ -112,13 +112,17 @@ void add_random_bodies(World& w, Lcg& rng, int count, float height) {
 
 // A ragdoll standing at `at` (the middle of its torso): a torso; a head on a neck; arms and legs of two capsules
 // each. Shoulders, hips and neck are ball joints kept inside a cone; elbows and knees are hinges that bend one way.
-// Every joint is part of one tree, solved exactly.
+// Every joint is part of one tree, solved exactly, and damped (step 29), as a body's joints are: without it nothing
+// stops a limb swinging or the head rolling on its neck, and a ragdoll at rest never falls asleep. (The parts are
+// light, a few grams to a few hundred at density 1, so the damping is small; at these values the three come to rest
+// and fall asleep about six seconds after they are pushed.)
 void add_ragdoll(World& w, Vec3 at, Vec3 velocity) {
     const size_t first = w.bodies.size();
     const int torso = w.add(crate(at, {0.22f, 0.32f, 0.12f}));
     const int head = w.add(Body::solid_sphere(0.15f, 1, at + Vec3{0, 0.5f, 0}));
     Joint neck = Joint::ball(w.bodies, torso, head, at + Vec3{0, 0.35f, 0});
     neck.limit_cone(w.bodies, {0, 1, 0}, 0.6f);
+    neck.damping = 0.02f;
     w.add_joint(neck);
     // Limbs: [shoulder or hip, the way it hangs, upper length, lower length, radius, cone, which way the middle joint bends]
     struct Limb {
@@ -135,6 +139,7 @@ void add_ragdoll(World& w, Vec3 at, Vec3 velocity) {
         const int upper = w.add(Body::solid_capsule(limb.upper, limb.radius, 1, root - Vec3{0, upper_length / 2, 0}));
         Joint ball = Joint::ball(w.bodies, torso, upper, root);
         ball.limit_cone(w.bodies, {0, -1, 0}, limb.cone);
+        ball.damping = 0.02f;
         w.add_joint(ball);
         const Vec3 middle = root - Vec3{0, upper_length, 0};
         const int lower = w.add(Body::solid_capsule(limb.lower, limb.radius, 1, middle - Vec3{0, lower_length / 2, 0}));
@@ -142,6 +147,7 @@ void add_ragdoll(World& w, Vec3 at, Vec3 velocity) {
         hinge.enable_limit = true;  // an elbow bends forward, a knee back, each by up to about 140 degrees
         hinge.lower = limb.bend > 0 ? -2.4f : -0.05f;
         hinge.upper = limb.bend > 0 ? 0.05f : 2.4f;
+        hinge.damping = 0.01f;
         w.add_joint(hinge);
     }
     for (size_t i = first; i < w.bodies.size(); ++i) w.bodies[i].vel = velocity;
@@ -311,11 +317,15 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
                 const Real angle = i < planks / 2 ? -tilt : tilt;
                 const Vec3 along{std::cos(angle), std::sin(angle), 0};
                 const int plank = w.add(crate(at + along * (length / 2), {length / 2, 0.04f, 0.6f}, Quat::from_axis_angle({0, 0, 1}, angle)));
-                w.add_joint(Joint::hinge(w.bodies, previous, plank, at, {0, 0, 1}));
+                Joint hinge = Joint::hinge(w.bodies, previous, plank, at, {0, 0, 1});
+                hinge.damping = 0.012f;  // (a rope's own stiffness, which settles the swing slowly; see step 29)
+                w.add_joint(hinge);
                 previous = plank;
                 at += along * length;
             }
-            w.add_joint(Joint::hinge(w.bodies, previous, -1, at, {0, 0, 1}));
+            Joint last = Joint::hinge(w.bodies, previous, -1, at, {0, 0, 1});
+            last.damping = 0.012f;
+            w.add_joint(last);
             for (int i = 0; i < 5; ++i) w.add(crate({-2.4f + 1.2f * static_cast<float>(i), 5.5f + 0.8f * static_cast<float>(i), 0}, {0.3f, 0.3f, 0.3f}));
             cam.target = {0, 2.5f, 0};
             cam.distance = 13;
