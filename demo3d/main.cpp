@@ -614,7 +614,7 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) dragging = true;
             if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) dragging = false;
             if (e.type == SDL_EVENT_MOUSE_MOTION && dragging) cam.orbit(-e.motion.xrel * 0.008f, e.motion.yrel * 0.008f);
-            if (e.type == SDL_EVENT_MOUSE_WHEEL) cam.zoom(e.wheel.y > 0 ? 0.9f : 1.1f);
+            if (e.type == SDL_EVENT_MOUSE_WHEEL) cam.scroll(e.wheel.y);
         }
 
         const Uint64 now = SDL_GetTicksNS();

@@ -96,3 +96,13 @@ TEST(orbit_and_zoom_stay_within_bounds) {
     for (int i = 0; i < 100; ++i) cam.zoom(2.0f);
     CHECK(cam.distance <= 80);
 }
+
+TEST(scrolling_zooms_by_how_far_the_wheel_turned) {
+    Camera wheel, trackpad;
+    for (int i = 0; i < 6; ++i) wheel.scroll(1);
+    for (int i = 0; i < 60; ++i) trackpad.scroll(0.1f);  // the same turn, as a trackpad reports it
+    CHECK_NEAR(wheel.distance, 14 * std::pow(0.9f, 6), 1e-3f);
+    CHECK_NEAR(trackpad.distance, wheel.distance, 1e-3f);
+    for (int i = 0; i < 6; ++i) wheel.scroll(-1);
+    CHECK_NEAR(wheel.distance, 14, 1e-3f);  // in and back out: where it started
+}

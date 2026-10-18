@@ -67,6 +67,11 @@ struct Camera {
         pitch = std::clamp(pitch + d_pitch, static_cast<Real>(-1.5), static_cast<Real>(1.5));  // stop short of the poles
     }
     void zoom(Real factor) { distance = std::clamp(distance * factor, static_cast<Real>(2), static_cast<Real>(80)); }
+    // The mouse wheel: `notches` as SDL reports them, positive away from the user (in). Each whole notch is 10%
+    // closer, and a part of a notch a part of that, so a trackpad's stream of small scrolls zooms as far as the
+    // same distance on a wheel (a full notch per event slammed it from one end to the other), and in then out
+    // comes back where it started.
+    void scroll(Real notches) { zoom(std::pow(static_cast<Real>(0.9), notches)); }
 };
 
 }  // namespace demo3d
