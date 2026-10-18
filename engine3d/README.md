@@ -1503,6 +1503,95 @@ Test (1, 299 in total): the slack bridge of twice-pinned planks, with a crate dr
 (measured: 0.007 mm; with 24 rows at most, 19 mm). Deliberate breakages: the limit back to 24, and at 26 (one short):
 both caught.
 
+## Step 33: contacts and limits solved with the joints
+
+Step 31 found a light body joined to a heavy one dragged into a fixed one: a 4 g ball on a 10 cm ledge, joined to a
+34 g one falling past the ledge's end, sank half way in, and at 30 m/s went through. Twice over, it turned out:
+
+- **The exact solve** (step 30: after the contacts, the last word) gave the light ball the heavy one's speed, into the
+  ledge. The contact had pushed, and was simply undone.
+- **The joint position pass**, closing what the heavy ball's swing round the light one opened (a few centimetres a
+  step), moved the light ball, the lighter, 6 to 11 cm into the ledge; the second sweep let it stay a quarter of its
+  size deeper than before, every step.
+
+And the joints' limits and cones were in the same position as the contacts: solved in the sweeps, then overridden by the
+exact solve, which knows only the rows that hold both ways. (A hinge its limits lock, joining two bodies flung apart,
+was left turning at up to 54 rad/s.)
+
+**In the exact solve**, after the trees are solved, a tree that has left any of its contacts with fixed bodies, or any
+of its joints' limits and cones, short of its target by more than 1 cm/s has all of them solved with it. Each is a row
+that may only push, on one or two of the tree's bodies; how the tree answers an impulse on it is found by one tree
+solve, as for a loop's cut rows (step 27). The joints come first: the tree's cut rows are eliminated (a Schur
+complement), so the rows that may only push are solved against the tree with its loops closed, and the joints hold
+whatever they get. Then those rows by projected Gauss-Seidel on that small system, each one's impulse in all kept no
+less than zero; and the trees solved once more, for what single precision leaves the joints. Each choice was forced by
+a probe of random cases (a light box, ball or capsule resting on the floor, joined to a heavy ball moving at up to
+20 m/s, solved once; free, hinged to the world as well, or joined by a hinge its limits lock):
+
+- The joints' cut rows and the contacts solved as one least-squares system: a contact that could not be met took the
+  joint with it, and a box hinged to the world, lying on the floor, was left opening its hinge.
+- Choosing which contacts are met by trying (taking in the furthest short, letting go one that would pull): it went
+  round in circles where neither was right, ran out of tries, and left contacts pulling.
+- Gauss-Seidel without a stop: where the contacts cannot all be met (that hinged box can only turn one way, and two
+  contacts may want it turned opposite ways), two of them pushed against each other harder every sweep, to millions.
+  So the sweeps stop when the shortfall stops falling (and a few possible cases with them, early); and a row the joints
+  all but fix, its answer to an impulse a hundred thousandth of what it would be with its bodies free, is left out.
+  Judged at first against the most any row of the tree answers, every contact of a ragdoll with a limit beside it was
+  left out (a light limb turns far more, in radians a second, than it moves, in metres a second); and at a thousandth
+  of its own free answer, a door hinged at the face of its post, the post touching it near the hinge, was pushed 27 mm
+  into the post.
+- Contacts only, without the limits: a ragdoll's forearm and thigh resting on the steps against their joints' limits
+  were turned into the limits by the contacts every step and put back by the position pass, turning at 0.04 rad/s
+  without moving, and the ragdoll never fell asleep. The limits are solved with the trees in every tree, contacts or
+  none.
+
+**In the position pass**, each tree's correction is followed by the same solve for poses: a contact with a fixed body
+may be taken no deeper than the slop, or than it already is, the whole pass counted. The rows are taken where the
+bodies are, after their move and the sweep: overlapping, one per point of their contact; apart by up to 25 cm, one
+between the closest points, which the pass may close by the gap. (Rows from the narrow phase's contact held a ball that
+had slid off the end of a ledge to the ledge's top as if it went on, and its joint stood 9 cm open at 60 m/s; with no
+row for bodies apart, the velocity solve having lifted the ball 4 mm off the ledge, the pass pulled it 6 cm in.)
+
+| the ledge, light ball deepest in it | 10 m/s | 15 | 20 | 25 | 30 | 40 | 60 |
+|---|---|---|---|---|---|---|---|
+| step 32 | 53 mm | 47 | 75 | 75 | 150, through | 150, through | 150, through |
+| step 33 | 13 mm | 5 | 5 | 5 | 30 | 5 | 155 |
+
+(5 mm is the slop.) At 20 m/s, with the contacts in the exact solve only, 45 mm; in the position pass only, 38. At
+60 m/s the heavy ball swings 0.6 rad a step round the light one, which the pass's straight-line rows do not follow: a
+limit, left there.
+
+| the probe (the test's 1200 cases), solved once | step 32 | step 33 |
+|---|---|---|
+| free: contacts left closing by over 1.1 cm/s | 74%, up to 12 m/s | 1.5%, up to 0.1 m/s |
+| hinged to the world: the same (many cannot all be met) | 264 of 400 | 33 of 400 |
+| locked hinges, turning | up to 54 rad/s | 0.007 rad/s |
+| joints, opening | 0.26 mm/s | 0.20 mm/s |
+
+Joined by hinges with limits of a range (0.1 to 0.6 rad), free contacts left short: 1 to 4%, by up to 2.7 m/s (step 32:
+77%, by up to 14 m/s). In the demo: the ragdolls' contacts, over eight seconds, 139 points left 0.1 m/s or more short
+and now none (none over 1 cm/s); worst joint gap 0.10 mm. They take longer to come to rest: one ragdoll, held up on a
+step edge, slowly tips off it and slides, and the last falls asleep at 15.6 s rather than 10.7.
+
+Also in the demo (scene 7): the door's hinge stood on the face of its post, and the door, 12 cm thick, could not turn
+either way without an edge going into the post. Before step 33 it went through the post, 27 mm, and swung; held out of
+the post, it did not open at all. The hinge now stands 7 cm out from the post, and the door swings again.
+
+Cost: every tree with a limit or a cone is looked at every step, and solved only when something is short. Chains
+benchmark: 1 to 3% slower; the ragdolls, sleeping off, 0.122 ms a step against 0.111.
+
+Tests (5, 304 in total): the light ball dragged along the ledge at 20 m/s stays within 1 cm (measured: 5 mm); the
+position pass takes a body into the floor no further than the slop in all, over the rounds a 0.4 m gap needs; the
+probe, 1200 random cases (no contact pulling; joints holding to 1 mm/s; momentum accounted for by the contacts'
+impulses; free contacts met but for under 5%, by under 0.3 m/s; the hinged short in under 15%; no impulse beyond
+2000 m/s of the bodies' speed; locked hinges locked); a locked hinge in a chain with no contact at all; and the door
+hinged at the face of its post, not pushed into it. Deliberate breakages, each caught: no contacts in the exact solve,
+or in the position pass; no rows for bodies apart; the position pass's limit taken afresh each round; contacts allowed
+to pull; the cut rows not eliminated first; rows the joints all but fix taken in; such rows judged at a thousandth, or
+against the largest answer of any row; no stop on stalling; the contacts' impulses not kept; the limits and cones left
+out; trees with limits visited only when they have contacts; limits solved only when there are contacts; no second
+tree solve; a slack of 10 m/s; no contacts collected.
+
 ## Planned next
 
 To be decided.

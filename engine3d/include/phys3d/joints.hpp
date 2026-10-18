@@ -133,6 +133,18 @@ struct JointRow {
 
 class JointTrees;  // (step 23: joints that form a tree, solved exactly; see src/joint_trees.hpp)
 
+// A contact point between a moving body and a fixed one, for the exact solve and the joint position pass (step 33).
+// An impulse lambda along it changes the body's velocity by lin lambda / m and its spin by I^-1 ang lambda. For the
+// exact solve, its speed lin . v + ang . w should end no less than `target`, and the impulse it has had in all,
+// `*impulse`, no less than zero; for the position pass, what the pass moves it along the row (lin . dx + ang . dθ)
+// should be no less than `target` (no `impulse`).
+struct FixedContact {
+    int body = -1;  // the moving body's index
+    Vec3 lin, ang;
+    Real target = 0;
+    Real* impulse = nullptr;
+};
+
 class JointSolver {
 public:
     JointSolver();
@@ -152,8 +164,10 @@ public:
     // exactly (step 23). The contact solver asks for that in its last sweep.
     void solve_velocity(bool exactly = true);
     // Only the exact solve of the rows of joints that form trees (and their loops), with no sweep before it. The
-    // contact solver does this once, after its last sweep, so that the joints have the last word (step 30).
-    void solve_exactly();
+    // contact solver does this once, after its last sweep, so that the joints have the last word (step 30). Contacts
+    // of the trees' bodies with fixed ones, and the trees' limits and cones, that it leaves short of their targets are
+    // then solved with the trees (step 33): a joint can no longer pull a body into something fixed, or past a limit.
+    void solve_exactly(std::span<FixedContact> contacts = {});
     void store();          // saves the accumulated impulses back into the joints
     // Position pass (rows built with for_velocity false): corrects the rows of joints that form trees, all of a
     // tree at once (step 26), each error limited to `max_linear` or `max_angular`. `taken[j]` is set for each
@@ -161,7 +175,7 @@ public:
     // a limit or cone of it, past its limit, was corrected with them (step 31), to 1 if not. And `error[j]` is set
     // to the largest error of that joint's tree (metres or radians).
     void correct_trees(std::vector<Body>& bodies, Real max_linear, Real max_angular, std::vector<std::uint8_t>& taken,
-                       std::vector<Real>& error);
+                       std::vector<Real>& error, std::span<FixedContact> contacts = {});
 
     const std::vector<JointRow>& rows() const { return rows_; }
     std::vector<JointRow>& rows_mutable() { return rows_; }
@@ -183,6 +197,7 @@ private:
 // remove whatever joint error is left (at most 20 cm / 8 degrees per correction). Velocities are not
 // touched, so it cannot add energy. Rows are corrected one at a time, each measured from the poses the
 // previous correction left behind (Gauss-Seidel), within a joint as well as between joints.
-void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings);
+void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings,
+                           std::span<FixedContact> contacts = {});
 
 }  // namespace phys3d

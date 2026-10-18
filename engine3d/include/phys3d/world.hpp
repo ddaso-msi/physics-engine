@@ -125,6 +125,9 @@ private:
     std::vector<Held> held_;  // bodies held still for a joint position pass, and what they were
     std::vector<std::uint8_t> island_held_;  // per island root: whether it has one (then per body: whether in one)
     std::vector<Joint> held_joints_;         // copies of those islands' joints
+    std::span<FixedContact> fixed_contacts();  // (see world.cpp)
+    std::vector<FixedContact> fixed_contacts_;
+    std::vector<std::uint8_t> jointed_;
     std::vector<std::uint8_t> island_awake_;
     std::vector<Real> island_still_;
     StepStats stats_;

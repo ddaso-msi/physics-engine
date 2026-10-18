@@ -433,16 +433,22 @@ void JointSolver::solve_velocity(bool exactly) {
     if (exactly) trees_->solve(rows_);
 }
 
-void JointSolver::solve_exactly() { trees_->solve(rows_); }
+void JointSolver::solve_exactly(std::span<FixedContact> contacts) {
+    trees_->solve(rows_);
+    // (And once more if the contacts, limits and cones changed anything: their impulses can be large, against each
+    // other through a joint, and what they leave the joints in single precision, a few millimetres a second, is put
+    // right.)
+    if (trees_->touch(rows_, contacts)) trees_->solve(rows_);
+}
 
 void JointSolver::correct_trees(std::vector<Body>& bodies, Real max_linear, Real max_angular, std::vector<std::uint8_t>& taken,
-                                std::vector<Real>& error) {
+                                std::vector<Real>& error, std::span<FixedContact> contacts) {
     std::vector<int> first = first_row_;
     first.push_back(static_cast<int>(rows_.size()));
     std::vector<std::uint8_t> by_position;
     trees_->build(bodies, rows_, first, &by_position, /*violated=*/true);
     std::vector<Real> largest(by_position.size(), 0);
-    trees_->correct(rows_, max_linear, max_angular, largest);
+    trees_->correct(rows_, max_linear, max_angular, largest, contacts);
     for (size_t k = 0; k < by_position.size(); ++k)
         if (by_position[k]) {
             taken[static_cast<size_t>(joint_of_[k])] = by_position[k];
@@ -454,12 +460,27 @@ void JointSolver::store() {
     for (const JointRow& r : rows_) *r.store = r.impulse;
 }
 
-void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings) {
+void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings,
+                           std::span<FixedContact> contacts) {
     JointSolver solver, all;
     std::vector<std::uint8_t> taken, sub_taken, limit_done;
     std::vector<Real> error, sub_error;
     std::vector<size_t> again, still;  // the joints of trees that need another pass
     std::vector<Joint> sub;
+    // Contacts with fixed bodies (step 33): what each may still move along its row, the whole pass counted, so that
+    // the passes after the first cannot each take it as far again.
+    std::vector<FixedContact> left(contacts.begin(), contacts.end());
+    std::vector<std::pair<Vec3, Quat>> start;
+    for (const FixedContact& c : contacts) start.push_back({bodies[static_cast<size_t>(c.body)].pos, bodies[static_cast<size_t>(c.body)].q});
+    auto still_left = [&]() -> std::span<FixedContact> {
+        for (size_t i = 0; i < left.size(); ++i) {
+            const Body& b = bodies[static_cast<size_t>(left[i].body)];
+            Quat turn = b.q * conjugate(start[i].second);
+            if (turn.w < 0) turn = turn * Real(-1);
+            left[i].target = contacts[i].target - (dot(left[i].lin, b.pos - start[i].first) + dot(left[i].ang, turn.vector_part() * 2));
+        }
+        return left;
+    };
     for (int pass = 0; pass < settings.joint_position_iterations; ++pass) {
         // First the joints that form trees, all of each tree at once (step 26): their rows that hold both ways
         // measured once and corrected together, so that the correction of one joint is made knowing what it does
@@ -473,7 +494,7 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
             all.prepare(bodies, joints, 1, settings, /*for_velocity=*/false);
             taken.assign(joints.size(), 0);
             error.assign(joints.size(), 0);
-            all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, taken, error);
+            all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, taken, error, still_left());
             again.clear();
             for (size_t j = 0; j < joints.size(); ++j)
                 if (taken[j] && error[j] > kTreesSettled) again.push_back(j);
@@ -484,7 +505,7 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
             all.prepare(bodies, sub, 1, settings, /*for_velocity=*/false);
             sub_taken.assign(sub.size(), 0);
             sub_error.assign(sub.size(), 0);
-            all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, sub_taken, sub_error);
+            all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, sub_taken, sub_error, still_left());
             still.clear();
             limit_done.assign(joints.size(), 0);
             for (size_t i = 0; i < again.size(); ++i) {

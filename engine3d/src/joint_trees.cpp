@@ -100,6 +100,86 @@ bool two_way(const JointRow& r) { return r.lower == -kInf && r.upper == kInf && 
 // A one-sided row (a limit, the cone) past its limit, as the position pass builds it: an error below zero.
 bool past_limit(const JointRow& r) { return r.lower == 0 && r.upper == kInf && r.error < 0 && r.softness == 0 && r.mass > 0; }
 
+// Rows whose speeds (or errors) answer impulses lambda on them by W lambda, W n x n and symmetric but for rounding:
+// lambda to bring them as near as they can come to `need`. First a Cholesky factoring of W, dropping any row whose
+// pivot vanishes: that row is implied, to first order, by the rows before it and the tree's (a straight chain fixed
+// at both ends cannot be pulled along its length: its cut row along the chain is then such a row), and it is given
+// no impulse. That is only to find them. What is solved is N lambda = W need over the rows kept, N = W W (taking W's
+// rows and columns of those): lambda by least squares (step 31). When they can all have what they need (as for speeds
+// they always can) that is the same lambda as W lambda = need; when they cannot (positions where no pose meets them
+// all: a body held where the rows of two joints, both fixed at their other ends, put it at two different places)
+// solving W lambda = need over the rows kept met those exactly and left whatever followed for the dropped one, which
+// could be much more than all of them had needed: nearly three times as far apart as a pose could bring them.
+// factor_least_squares leaves N's factor in L (W made exactly symmetric); solve_least_squares then solves.
+void factor_least_squares(int n, std::vector<double>& W, std::vector<double>& L, std::uint8_t* dropped) {
+    auto at = [n](int i, int j) { return static_cast<size_t>(i * n + j); };
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < i; ++j) W[at(i, j)] = W[at(j, i)] = 0.5 * (W[at(i, j)] + W[at(j, i)]);
+    L.assign(static_cast<size_t>(n * n), 0.0);
+    double scale = 0;
+    for (int i = 0; i < n; ++i) scale = std::max(scale, W[at(i, i)]);
+    for (int c = 0; c < n; ++c) {
+        double d = W[at(c, c)];
+        for (int k = 0; k < c; ++k) d -= L[at(c, k)] * L[at(c, k)];
+        dropped[c] = !(d > 1e-6 * scale);
+        if (dropped[c]) {
+            L[at(c, c)] = 1;
+            continue;  // (its column below stays zero)
+        }
+        L[at(c, c)] = std::sqrt(d);
+        for (int i = c + 1; i < n; ++i) {
+            double e = W[at(i, c)];
+            for (int k = 0; k < c; ++k) e -= L[at(i, k)] * L[at(c, k)];
+            L[at(i, c)] = e / L[at(c, c)];
+        }
+    }
+    std::vector<double> N(static_cast<size_t>(n * n), 0.0);
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j) {
+            if (dropped[i] || dropped[j]) continue;
+            double sum = 0;
+            for (int k = 0; k < n; ++k) sum += W[at(i, k)] * W[at(k, j)];
+            N[at(i, j)] = sum;
+        }
+    L.assign(static_cast<size_t>(n * n), 0.0);
+    for (int c = 0; c < n; ++c) {
+        if (dropped[c]) {
+            L[at(c, c)] = 1;
+            continue;
+        }
+        double d = N[at(c, c)];
+        for (int k = 0; k < c; ++k) d -= L[at(c, k)] * L[at(c, k)];
+        L[at(c, c)] = std::sqrt(std::max(d, 1e-300));
+        for (int i = c + 1; i < n; ++i) {
+            double e = N[at(i, c)];
+            for (int k = 0; k < c; ++k) e -= L[at(i, k)] * L[at(c, k)];
+            L[at(i, c)] = e / L[at(c, c)];
+        }
+    }
+}
+void solve_least_squares(int n, const std::vector<double>& W, const std::vector<double>& L, const std::uint8_t* dropped,
+                         const double* need, double* lambda) {
+    auto at = [n](int i, int j) { return static_cast<size_t>(i * n + j); };
+    for (int i = 0; i < n; ++i) {  // N lambda = W need, by L L^T (a dropped row gets none)
+        lambda[i] = 0;
+        if (!dropped[i])
+            for (int k = 0; k < n; ++k) lambda[i] += W[at(i, k)] * need[k];
+    }
+    for (int i = 0; i < n; ++i) {
+        if (dropped[i]) {
+            lambda[i] = 0;
+            continue;
+        }
+        for (int k = 0; k < i; ++k) lambda[i] -= L[at(i, k)] * lambda[k];
+        lambda[i] /= L[at(i, i)];
+    }
+    for (int i = n - 1; i >= 0; --i) {
+        if (dropped[i]) continue;
+        for (int k = i + 1; k < n; ++k) lambda[i] -= L[at(k, i)] * lambda[k];
+        lambda[i] /= L[at(i, i)];
+    }
+}
+
 }  // namespace
 
 void JointTrees::child_block(int c, double out[6][6]) const {
@@ -134,6 +214,8 @@ int JointTrees::add_node(int size, Body* body) {
 void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointRow>& rows, const std::vector<int>& first,
                        std::vector<std::uint8_t>* taken, bool violated) {
     if (taken) taken->assign(first.empty() ? 0 : first.size() - 1, 0);
+    first_ = first;
+    base_ = bodies.data();
     // A joint taken in is marked 1, or 2 if one of the rows taken was a limit past its limit.
     auto mark = [&](int joint, int row) {
         std::uint8_t& t = (*taken)[static_cast<size_t>(joint)];
@@ -374,9 +456,15 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
     std::vector<int>& cursor = piece_;  // (borrowed)
     cursor.assign(tree_start_.begin(), tree_start_.end() - 1);
     body_step_.assign(bodies.size(), -1);
+    one_sided_.assign(static_cast<size_t>(trees_), 0);
     for (size_t k = 0; k < steps_.size(); ++k) {
         tree_steps_[static_cast<size_t>(cursor[static_cast<size_t>(steps_[k].tree)]++)] = static_cast<int>(k);
         if (steps_[k].body) body_step_[static_cast<size_t>(steps_[k].body - base)] = static_cast<int>(k);
+        if (const int j = steps_[k].joint; j >= 0)
+            for (int r = first[static_cast<size_t>(j)]; r < first[static_cast<size_t>(j) + 1]; ++r) {
+                const JointRow& row = rows[static_cast<size_t>(r)];
+                if (row.lower == 0 && row.upper == kInf && row.softness == 0 && row.mass > 0) one_sided_[static_cast<size_t>(steps_[k].tree)] = 1;
+            }
     }
 
     // The loops: each tree's cut rows, and how its bodies answer an impulse on each.
@@ -445,7 +533,7 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
                 column = std::copy(vec_.begin() + st.vec + st.size, vec_.begin() + st.vec + 2 * st.size, column);
             }
         }
-        // W = J_cut A, and its Cholesky factor. (Its entries: row i of the cut rows, against the bodies' answer to
+        // W = J_cut A, and its factoring (above). (Its entries: row i of the cut rows, against the bodies' answer to
         // column j, read back from the column at the place of the body's step.)
         std::vector<int>& start_of = step_of_;  // (borrowed: where each of the tree's steps starts in a column)
         start_of.assign(steps_.size(), 0);
@@ -467,60 +555,7 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
                 W[static_cast<size_t>(i * count + j)] = sum;
             }
         }
-        for (int i = 0; i < count; ++i)  // (symmetric but for rounding)
-            for (int j = 0; j < i; ++j)
-                W[static_cast<size_t>(i * count + j)] = W[static_cast<size_t>(j * count + i)] =
-                    0.5 * (W[static_cast<size_t>(i * count + j)] + W[static_cast<size_t>(j * count + i)]);
-        // Cholesky of W, dropping any row whose pivot vanishes: that row is implied, to first order, by the rows
-        // before it and the tree's (a straight chain fixed at both ends cannot be pulled along its length: its cut
-        // row along the chain is then such a row), and it is given no impulse.
-        double scale = 0;
-        for (int i = 0; i < count; ++i) scale = std::max(scale, W[static_cast<size_t>(i * count + i)]);
-        for (int c = 0; c < count; ++c) {
-            double d = W[static_cast<size_t>(c * count + c)];
-            for (int k = 0; k < c; ++k) d -= loop.L[static_cast<size_t>(c * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
-            loop.dropped[c] = !(d > 1e-6 * scale);
-            if (loop.dropped[c]) {
-                loop.L[static_cast<size_t>(c * count + c)] = 1;
-                continue;  // (its column below stays zero)
-            }
-            loop.L[static_cast<size_t>(c * count + c)] = std::sqrt(d);
-            for (int i = c + 1; i < count; ++i) {
-                double e = W[static_cast<size_t>(i * count + c)];
-                for (int k = 0; k < c; ++k) e -= loop.L[static_cast<size_t>(i * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
-                loop.L[static_cast<size_t>(i * count + c)] = e / loop.L[static_cast<size_t>(c * count + c)];
-            }
-        }
-        // That was only to find the rows to drop. What is solved is N lambda = W need over the rows kept, N = W W
-        // (taking W's rows and columns of those): lambda that brings the cut rows as near as they can come to what
-        // they need, by least squares (step 31). When they can all have it (as for speeds they always can) that is
-        // the same lambda as W lambda = need; when they cannot (positions where no pose meets them all: a body held
-        // where the rows of two joints, both fixed at their other ends, put it at two different places) solving
-        // W lambda = need over the rows kept met those exactly and left whatever followed for the dropped one, which
-        // could be much more than all of them had needed: nearly three times as far apart as a pose could bring them.
-        std::vector<double> N(static_cast<size_t>(count * count), 0.0);
-        for (int i = 0; i < count; ++i)
-            for (int j = 0; j < count; ++j) {
-                if (loop.dropped[i] || loop.dropped[j]) continue;
-                double sum = 0;
-                for (int k = 0; k < count; ++k) sum += W[static_cast<size_t>(i * count + k)] * W[static_cast<size_t>(k * count + j)];
-                N[static_cast<size_t>(i * count + j)] = sum;
-            }
-        loop.L.assign(static_cast<size_t>(count * count), 0.0);
-        for (int c = 0; c < count; ++c) {
-            if (loop.dropped[c]) {
-                loop.L[static_cast<size_t>(c * count + c)] = 1;
-                continue;
-            }
-            double d = N[static_cast<size_t>(c * count + c)];
-            for (int k = 0; k < c; ++k) d -= loop.L[static_cast<size_t>(c * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
-            loop.L[static_cast<size_t>(c * count + c)] = std::sqrt(std::max(d, 1e-300));
-            for (int i = c + 1; i < count; ++i) {
-                double e = N[static_cast<size_t>(i * count + c)];
-                for (int k = 0; k < c; ++k) e -= loop.L[static_cast<size_t>(i * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
-                loop.L[static_cast<size_t>(i * count + c)] = e / loop.L[static_cast<size_t>(c * count + c)];
-            }
-        }
+        factor_least_squares(count, W, loop.L, loop.dropped);
     }
     if (taken)
         for (const Loop& loop : loops_)
@@ -614,24 +649,7 @@ void JointTrees::close_loops(std::vector<JointRow>& rows, bool positions, Real m
         }
         double need[kMaxCutRows];
         std::copy(lambda, lambda + n, need);
-        for (int i = 0; i < n; ++i) {  // N lambda = W need, by L L^T (a dropped row gets none)
-            lambda[i] = 0;
-            if (!loop.dropped[i])
-                for (int k = 0; k < n; ++k) lambda[i] += loop.W[static_cast<size_t>(i * n + k)] * need[k];
-        }
-        for (int i = 0; i < n; ++i) {
-            if (loop.dropped[i]) {
-                lambda[i] = 0;
-                continue;
-            }
-            for (int k = 0; k < i; ++k) lambda[i] -= loop.L[static_cast<size_t>(i * n + k)] * lambda[k];
-            lambda[i] /= loop.L[static_cast<size_t>(i * n + i)];
-        }
-        for (int i = n - 1; i >= 0; --i) {
-            if (loop.dropped[i]) continue;
-            for (int k = i + 1; k < n; ++k) lambda[i] -= loop.L[static_cast<size_t>(k * n + i)] * lambda[k];
-            lambda[i] /= loop.L[static_cast<size_t>(i * n + i)];
-        }
+        solve_least_squares(n, loop.W, loop.L, loop.dropped, need, lambda);
         // A lambda, node by node.
         const int first_step = tree_start_[static_cast<size_t>(loop.tree)], end_step = tree_start_[static_cast<size_t>(loop.tree) + 1];
         size_t offset = 0;
@@ -653,6 +671,285 @@ void JointTrees::close_loops(std::vector<JointRow>& rows, bool positions, Real m
         if (!positions)
             for (int i = 0; i < n; ++i) apply_impulse(rows[static_cast<size_t>(loop.rows[i])], static_cast<Real>(lambda[i]));
     }
+}
+
+// How far short of its target a contact with a fixed body may be left: no more is solved. In the exact solve (m/s),
+// most are left a few millimetres a second short, which the next step's push-out takes care of; a ragdoll's limbs on
+// steps were up to 10 m/s short as they landed. In the position pass (m), a tenth of a millimetre.
+constexpr double kTouchSlack = 0.01, kTouchSlackPositions = 1e-4;
+
+void JointTrees::correct(std::vector<JointRow>& rows, Real max_linear, Real max_angular, std::vector<Real>& largest,
+                         std::span<FixedContact> contacts) {
+    if (!contacts.empty()) {
+        touch_pos_.resize(body_step_.size());
+        touch_q_.resize(body_step_.size());
+        for (const FixedContact& c : contacts)
+            if (c.body >= 0 && static_cast<size_t>(c.body) < body_step_.size() && body_step_[static_cast<size_t>(c.body)] >= 0) {
+                const Body* body = steps_[static_cast<size_t>(body_step_[static_cast<size_t>(c.body)])].body;
+                touch_pos_[static_cast<size_t>(c.body)] = body->pos;
+                touch_q_[static_cast<size_t>(c.body)] = body->q;
+            }
+    }
+    pass(rows, true, max_linear, max_angular, &largest);
+    if (!contacts.empty()) touch(rows, contacts, /*positions=*/true);
+}
+
+bool JointTrees::touch(std::vector<JointRow>& rows, std::span<FixedContact> contacts, bool positions) {
+    by_tree_.clear();
+    for (size_t i = 0; i < contacts.size(); ++i) {
+        const int body = contacts[i].body;
+        if (body < 0 || static_cast<size_t>(body) >= body_step_.size()) continue;
+        const int step = body_step_[static_cast<size_t>(body)];
+        if (step >= 0) by_tree_.push_back({steps_[static_cast<size_t>(step)].tree, static_cast<int>(i)});
+    }
+    std::sort(by_tree_.begin(), by_tree_.end());
+    // Every tree, for velocities (its limits and cones may be short with no contact at all); for poses, those with
+    // contacts.
+    bool changed = false;
+    size_t first = 0;
+    for (int tree = 0; tree < trees_; ++tree) {
+        size_t end = first;
+        while (end < by_tree_.size() && by_tree_[end].first == tree) ++end;
+        if (end > first || (!positions && one_sided_[static_cast<size_t>(tree)])) changed = touch_tree(rows, contacts, tree, first, end, positions) || changed;
+        first = end;
+    }
+    return changed;
+}
+
+bool JointTrees::touch_tree(std::vector<JointRow>& rows, std::span<FixedContact> contacts, int tree, size_t first, size_t end,
+                            bool positions) {
+    // Where each contact stands now: its speed, or how far the correction has moved it. Nothing to do unless one is
+    // short.
+    const double slack = positions ? kTouchSlackPositions : kTouchSlack;
+    touching_.clear();
+    bool any = false;
+    for (size_t k = first; k < end; ++k) {
+        const FixedContact& c = contacts[static_cast<size_t>(by_tree_[k].second)];
+        const int step = body_step_[static_cast<size_t>(c.body)];
+        const Body* body = steps_[static_cast<size_t>(step)].body;
+        double now;
+        if (positions) {
+            Quat turn = body->q * conjugate(touch_q_[static_cast<size_t>(c.body)]);
+            if (turn.w < 0) turn = turn * Real(-1);
+            now = static_cast<double>(dot(c.lin, body->pos - touch_pos_[static_cast<size_t>(c.body)]) + dot(c.ang, turn.vector_part() * 2));
+        } else {
+            now = static_cast<double>(dot(c.lin, body->vel) + dot(c.ang, body->w));
+        }
+        const double short_by = static_cast<double>(c.target) - now;
+        any = any || short_by > slack;
+        touching_.push_back({by_tree_[k].second, -1, {step, -1}, {{c.lin.x, c.lin.y, c.lin.z, c.ang.x, c.ang.y, c.ang.z}, {}}, short_by});
+    }
+    const int first_step = tree_start_[static_cast<size_t>(tree)], end_step = tree_start_[static_cast<size_t>(tree) + 1];
+    // For velocities, the tree's joints' limits and cones too: they may only push as well, and they came before (in
+    // the sweeps), so the exact solve could undo them, as it did the contacts (a hinge locked by its limits, joining
+    // two bodies flung apart at up to 20 m/s, was left turning at up to 66 rad/s), and so could the contacts. Left out, a ragdoll's forearm and thigh, resting on
+    // the steps against their joints' limits, were turned into the limits by the contacts every step and put back by
+    // the position pass: turning at 0.04 rad/s without moving, and the ragdoll never fell asleep.
+    if (!positions)
+        for (int k = first_step; k < end_step; ++k) {
+            const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+            if (st.body || st.joint < 0) continue;
+            for (int r = first_[static_cast<size_t>(st.joint)]; r < first_[static_cast<size_t>(st.joint) + 1]; ++r) {
+                const JointRow& row = rows[static_cast<size_t>(r)];
+                if (!(row.lower == 0 && row.upper == kInf && row.softness == 0 && row.mass > 0)) continue;
+                Touching t{-1, r, {-1, -1}, {}, -static_cast<double>(row.bias + row.velocity())};
+                any = any || t.short_by > slack;
+                const Body* side[2] = {row.a, row.b};
+                for (int s = 0; s < 2; ++s) {
+                    const std::ptrdiff_t i = side[s] - base_;
+                    if (i >= 0 && static_cast<size_t>(i) < body_step_.size() && body_step_[static_cast<size_t>(i)] >= 0) {
+                        t.step[s] = body_step_[static_cast<size_t>(i)];
+                        const Vec3 lin = s == 0 ? row.lin_a : row.lin_b, ang = s == 0 ? row.ang_a : row.ang_b;
+                        const double J[6] = {lin.x, lin.y, lin.z, ang.x, ang.y, ang.z};
+                        std::copy(J, J + 6, t.J[s]);
+                    }
+                }
+                touching_.push_back(t);
+            }
+        }
+    if (!any) return false;
+    // The tree's cut rows come first, if it has a loop: solved again with the contacts, so that they still hold.
+    const Loop* loop = nullptr;
+    for (const Loop& l : loops_)
+        if (l.tree == tree && l.size > 0) loop = &l;
+    const int cut = loop ? loop->size : 0;
+    const size_t room = static_cast<size_t>(kMaxCutRows - cut);
+    if (touching_.size() > room) {  // (the furthest short, if there are too many)
+        std::partial_sort(touching_.begin(), touching_.begin() + static_cast<std::ptrdiff_t>(room), touching_.end(),
+                          [](const Touching& x, const Touching& y) { return x.short_by > y.short_by; });
+        touching_.resize(room);
+    }
+    const int count = static_cast<int>(touching_.size()), n = cut + count;
+
+    // How the tree's nodes answer a unit impulse on each of them, as build() finds for cut rows.
+    touch_offset_.resize(steps_.size());
+    size_t length = 0;
+    for (int k = first_step; k < end_step; ++k) {
+        const int st = tree_steps_[static_cast<size_t>(k)];
+        touch_offset_[static_cast<size_t>(st)] = static_cast<int>(length);
+        length += static_cast<size_t>(steps_[static_cast<size_t>(st)].size);
+    }
+    touch_response_.resize(length * static_cast<size_t>(count));
+    for (int j = 0; j < count; ++j) {
+        for (int k = first_step; k < end_step; ++k) {
+            const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+            std::fill(vec_.begin() + st.vec, vec_.begin() + st.vec + st.size, 0.0);
+        }
+        const Touching& t = touching_[static_cast<size_t>(j)];
+        for (int s = 0; s < 2; ++s)
+            if (t.step[s] >= 0)
+                for (int d = 0; d < 6; ++d) vec_[static_cast<size_t>(steps_[static_cast<size_t>(t.step[s])].vec + d)] += t.J[s][d];
+        solve_tree(tree);
+        Scalar* column = touch_response_.data() + length * static_cast<size_t>(j);
+        for (int k = first_step; k < end_step; ++k) {
+            const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+            column = std::copy(vec_.begin() + st.vec + st.size, vec_.begin() + st.vec + 2 * st.size, column);
+        }
+    }
+    auto column_of = [&](int j) -> const Scalar* {
+        return j < cut ? response_.data() + loop->response + loop->length * static_cast<size_t>(j)
+                       : touch_response_.data() + length * static_cast<size_t>(j - cut);
+    };
+    // Row i (cut row i, or the other rows' i - cut) against an answer: how much that answer changes its speed.
+    auto speed_change = [&](int i, const Scalar* column) {
+        double sum = 0;
+        for (int s = 0; s < 2; ++s) {
+            const int st = i < cut ? loop->step[i][s] : touching_[static_cast<size_t>(i - cut)].step[s];
+            if (st < 0) continue;
+            const double* J = i < cut ? loop->J[i][s] : touching_[static_cast<size_t>(i - cut)].J[s];
+            for (int d = 0; d < 6; ++d) sum += J[d] * column[touch_offset_[static_cast<size_t>(st)] + d];
+        }
+        return sum;
+    };
+    std::vector<double> W(static_cast<size_t>(n * n)), need(static_cast<size_t>(n)), lambda(static_cast<size_t>(n), 0.0);
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j) W[static_cast<size_t>(i * n + j)] = speed_change(i, column_of(j));
+    for (int i = 0; i < cut; ++i) {  // (for poses: left as the correction left them)
+        const JointRow& row = rows[static_cast<size_t>(loop->rows[i])];
+        need[static_cast<size_t>(i)] = positions ? 0.0 : -static_cast<double>(row.velocity() + row.bias);
+    }
+    for (int i = cut; i < n; ++i) need[static_cast<size_t>(i)] = touching_[static_cast<size_t>(i - cut)].short_by;
+    auto at = [n](int i, int j) { return static_cast<size_t>(i * n + j); };
+
+    // The joints first: the cut rows hold whatever the contacts do. Given the contacts' impulses lambda_S, the cut
+    // rows' are lambda_C = W_CC^-1 (need_C - W_CS lambda_S) (by least squares, as close_loops solves them); so the
+    // contacts answer their own impulses through A = W_SS - W_SC W_CC^-1 W_CS, and need b = need_S - W_SC W_CC^-1
+    // need_C. (Solved as one least-squares system with the contacts, as at first, a contact that could not be met
+    // took the joint with it: a body hinged to the world and lying on the floor was left opening its hinge.)
+    std::vector<double> through(static_cast<size_t>(cut * (count + 1)));  // W_CC^-1 need_C, then W_CC^-1 W_C(contact j)
+    if (cut > 0) {
+        double rhs[kMaxCutRows], out[kMaxCutRows];
+        for (int k = 0; k <= count; ++k) {
+            for (int i = 0; i < cut; ++i) rhs[i] = k == 0 ? need[static_cast<size_t>(i)] : W[at(i, cut + k - 1)];
+            solve_least_squares(cut, loop->W, loop->L, loop->dropped, rhs, out);
+            std::copy(out, out + cut, through.begin() + static_cast<std::ptrdiff_t>(k * cut));
+        }
+    }
+    std::vector<double> A(static_cast<size_t>(count * count)), b(static_cast<size_t>(count)), low(static_cast<size_t>(count)), x(static_cast<size_t>(count), 0.0);
+    std::vector<std::uint8_t> fixed(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        b[static_cast<size_t>(i)] = need[static_cast<size_t>(cut + i)];
+        for (int c = 0; c < cut; ++c) b[static_cast<size_t>(i)] -= W[at(cut + i, c)] * through[static_cast<size_t>(c)];
+        for (int j = 0; j < count; ++j) {
+            double e = W[at(cut + i, cut + j)];
+            for (int c = 0; c < cut; ++c) e -= W[at(cut + i, c)] * through[static_cast<size_t>((1 + j) * cut + c)];
+            A[static_cast<size_t>(i * count + j)] = e;
+        }
+        const Touching& t = touching_[static_cast<size_t>(i)];
+        // How the row would answer an impulse with its bodies free, J M^-1 J^T, to compare its answer with the joints
+        // against. (Against the most any row of the tree answers, as at first, a contact's was always a thousandth of a
+        // forearm's limit's: an impulse turns a light limb far more, in radians a second, than it moves it in metres a
+        // second. Every contact of a ragdoll with a limit beside it was left out, by up to 8 m/s short.)
+        double free_answer = 0;
+        for (int s = 0; s < 2; ++s) {
+            if (t.step[s] < 0) continue;
+            const Body* body = steps_[static_cast<size_t>(t.step[s])].body;
+            const Vec3 lin{static_cast<Real>(t.J[s][0]), static_cast<Real>(t.J[s][1]), static_cast<Real>(t.J[s][2])};
+            const Vec3 ang{static_cast<Real>(t.J[s][3]), static_cast<Real>(t.J[s][4]), static_cast<Real>(t.J[s][5])};
+            free_answer += static_cast<double>(body->inv_mass * dot(lin, lin) + dot(ang, body->inv_inertia_world() * ang));
+        }
+        fixed[static_cast<size_t>(i)] = !(A[static_cast<size_t>(i * count + i)] > 1e-5 * free_answer);
+        const Real* had = t.contact >= 0 ? contacts[static_cast<size_t>(t.contact)].impulse : &rows[static_cast<size_t>(t.row)].impulse;
+        low[static_cast<size_t>(i)] = positions || !had ? 0.0 : -static_cast<double>(*had);  // (in all, never a pull)
+    }
+    // Then the contacts: each pushes no less than nothing in all, and is either met or not pushing (a contact that
+    // is no longer short gives back what it had over). Projected Gauss-Seidel on this small system, from the bodies'
+    // exact answer to each: one contact at a time, its impulse what it needs given the others', clamped; until the
+    // changes are negligible. (Choosing which are met by trying, adding the furthest short or dropping one that would
+    // pull, went round in circles where neither choice was right, the attempts ran out, and a contact was left
+    // pulling.) Where the contacts cannot all be met (a body hinged to the world and lying on the floor can only turn
+    // one way, and two contacts may want it turned opposite ways), two of them pushing against each other through the
+    // hinge could each push harder every sweep without end, impulses in the millions that cancel, and applied in single
+    // precision they opened the hinge. So the sweeps stop as soon as they stop helping: when the contacts' shortfall,
+    // all of them together, has not fallen by a hundredth in three sweeps. A contact the joints all but fix (its answer
+    // to an impulse a hundred thousandth of what it would be with its bodies free, or less) is left as it is: it would
+    // take an impulse far out of proportion to move it at all. (A door hinged beside its post, touching it near the
+    // hinge, answers a ten thousandth as much as it would free: that one is taken in.)
+    double shortfall_was = std::numeric_limits<double>::infinity();
+    int stalled = 0;
+    for (int sweep = 0; sweep < 200; ++sweep) {
+        double biggest = 0;
+        for (int i = 0; i < count; ++i) {
+            const double d = A[static_cast<size_t>(i * count + i)];
+            if (fixed[static_cast<size_t>(i)]) continue;
+            double r = b[static_cast<size_t>(i)];
+            for (int j = 0; j < count; ++j) r -= A[static_cast<size_t>(i * count + j)] * x[static_cast<size_t>(j)];
+            const double next = std::max(low[static_cast<size_t>(i)], x[static_cast<size_t>(i)] + r / d);
+            biggest = std::max(biggest, std::fabs(next - x[static_cast<size_t>(i)]) * d);
+            x[static_cast<size_t>(i)] = next;
+        }
+        if (biggest < 1e-7) break;
+        double shortfall = 0;
+        for (int i = 0; i < count; ++i) {
+            if (fixed[static_cast<size_t>(i)]) continue;
+            double r = b[static_cast<size_t>(i)];
+            for (int j = 0; j < count; ++j) r -= A[static_cast<size_t>(i * count + j)] * x[static_cast<size_t>(j)];
+            shortfall += std::max(r, 0.0);
+        }
+        stalled = shortfall > 0.99 * shortfall_was ? stalled + 1 : 0;
+        if (stalled >= 3) break;
+        shortfall_was = std::min(shortfall_was, shortfall);
+    }
+    for (int i = 0; i < count; ++i) lambda[static_cast<size_t>(cut + i)] = x[static_cast<size_t>(i)];
+    for (int c = 0; c < cut; ++c) {
+        double l = through[static_cast<size_t>(c)];
+        for (int j = 0; j < count; ++j) l -= through[static_cast<size_t>((1 + j) * cut + c)] * x[static_cast<size_t>(j)];
+        lambda[static_cast<size_t>(c)] = l;
+    }
+
+    // Apply it. Poses: each body moved and turned by its part of the answer. Velocities: through the tree's own rows,
+    // the cut rows and the contacts, each as an impulse.
+    for (int k = first_step; k < end_step; ++k) {
+        const Step& st = steps_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+        if (positions != (st.body != nullptr)) continue;
+        const int offset = touch_offset_[static_cast<size_t>(tree_steps_[static_cast<size_t>(k)])];
+        Scalar change[6] = {};
+        for (int r = 0; r < st.size; ++r)
+            for (int j = 0; j < n; ++j) change[r] += column_of(j)[offset + r] * lambda[static_cast<size_t>(j)];
+        if (positions) {
+            st.body->pos += as_vec3(change);
+            st.body->q = integrate_orientation(st.body->q, as_vec3(change + 3), 1);
+        } else {
+            for (int r = 0; r < st.size; ++r) apply_impulse(rows[static_cast<size_t>(st.rows[r])], -static_cast<Real>(change[r]));
+        }
+    }
+    if (positions) return true;
+    for (int i = 0; i < cut; ++i) apply_impulse(rows[static_cast<size_t>(loop->rows[i])], static_cast<Real>(lambda[static_cast<size_t>(i)]));
+    for (int i = cut; i < n; ++i) {
+        const Real l = static_cast<Real>(lambda[static_cast<size_t>(i)]);
+        if (l == 0) continue;
+        const Touching& t = touching_[static_cast<size_t>(i - cut)];
+        if (t.row >= 0) {
+            apply_impulse(rows[static_cast<size_t>(t.row)], l);
+            continue;
+        }
+        const FixedContact& c = contacts[static_cast<size_t>(t.contact)];
+        Body* body = steps_[static_cast<size_t>(t.step[0])].body;
+        body->vel += c.lin * (body->inv_mass * l);
+        body->w += body->inv_inertia_world() * c.ang * l;
+        *c.impulse += l;
+    }
+    return true;
 }
 
 void JointTrees::pass(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular, std::vector<Real>* largest) {

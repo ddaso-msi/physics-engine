@@ -287,6 +287,16 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
                          order.begin() + static_cast<std::ptrdiff_t>(starts[static_cast<size_t>(k) + 1]),
                          [&](size_t x, size_t y) { return contacts[x].manifold.count > contacts[y].manifold.count; });
 
+    // Contacts of jointed bodies with fixed ones, for the exact solve at the end (step 33).
+    std::vector<std::uint8_t> jointed;
+    if (!joints.empty()) {
+        jointed.assign(bodies.size(), 0);
+        for (const Joint& j : joints)
+            for (const int b : {j.a, j.b})
+                if (b >= 0) jointed[static_cast<size_t>(b)] = 1;
+    }
+    std::vector<FixedContact> fixed;
+
     auto prepare = [&](size_t source, ContactConstraint& c) {
         const ContactPair& pair = contacts[source];
         c.source = source;
@@ -314,6 +324,14 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
             const Real bounce = approach < -settings.restitution_threshold ? -restitution * approach : 0;
             const Real push_out = settings.baumgarte / dt * std::max(cp.depth - settings.slop, Real(0));
             p.bias = std::max(bounce, push_out);
+            if (!jointed.empty()) {
+                const bool a_fixed = c.a->type != BodyType::Dynamic, b_fixed = c.b->type != BodyType::Dynamic;
+                Real* impulse = &contacts[source].manifold.points[k].normal_impulse;
+                if (a_fixed && !b_fixed && jointed[static_cast<size_t>(pair.b)])
+                    fixed.push_back({pair.b, c.normal, cross(rb, c.normal), p.bias, impulse});
+                else if (b_fixed && !a_fixed && jointed[static_cast<size_t>(pair.a)])
+                    fixed.push_back({pair.a, -c.normal, -cross(ra, c.normal), p.bias, impulse});
+            }
             p.normal_impulse = settings.warm_starting ? cp.normal_impulse : 0;
             p.tangent_impulse[0] = settings.warm_starting ? cp.tangent_impulse[0] : 0;
             p.tangent_impulse[1] = settings.warm_starting ? cp.tangent_impulse[1] : 0;
@@ -392,9 +410,11 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
     // The joints that form trees, exactly, after everything: the last word. (In the last sweep and before the
     // contacts, as it was, a hard landing's contact impulses came after it and opened the joints, by up to 2 cm on a
     // rope bridge with crates dropped on it, and closed them only in the position pass; solved last, 0.1 mm. What
-    // it costs the contacts is a little of their closing speed, which the next step's push-out handles.)
-    joint_solver.solve_exactly();
-    joint_solver.store();
+    // it costs the contacts is a little of their closing speed, which the next step's push-out handles; except that a
+    // contact with a fixed body could lose all of it, to a joint pulling the other way, and those are solved with the
+    // trees (step 33).)
+    // The contacts' impulses are kept first, for the exact solve adds to those of contacts with fixed bodies that it
+    // takes in (step 33).
     for (const WideConstraint& w : wide) unpack(w, contacts);
     for (const ContactConstraint& c : shared)
         for (int k = 0; k < c.count; ++k) {
@@ -403,6 +423,8 @@ void solve_constraints(std::vector<Body>& bodies, std::vector<ContactPair>& cont
             cp.tangent_impulse[0] = c.points[k].tangent_impulse[0];
             cp.tangent_impulse[1] = c.points[k].tangent_impulse[1];
         }
+    joint_solver.solve_exactly(fixed);
+    joint_solver.store();
 }
 
 }  // namespace phys3d

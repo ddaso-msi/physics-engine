@@ -1711,3 +1711,191 @@ TEST(a_bridge_of_twice_pinned_planks_is_solved_exactly_with_its_27_cut_rows) {
     CHECK(w.bodies[static_cast<size_t>(load)].pos.y > 1.5f);  // (it landed on the bridge, and is held there)
     CHECK(worst < 1e-3f);  // (measured: 0.007 mm; with 24 rows at most, 19 mm)
 }
+
+// ---- Step 33: contacts with fixed bodies in the exact solve and the position pass ----
+
+TEST(a_joint_cannot_drag_a_body_into_a_fixed_one) {
+    // A light ball and one eight times heavier, joined, falling side by side at 20 m/s, the light one onto a ledge:
+    // the heavy one swings down round it, past the ledge's end, and drags it along the ledge and off. Twice it was
+    // pulled into the ledge: the joints' exact solve, after the contacts, gave it the heavy one's speed; and the
+    // position pass, closing what the swing opens, moved it, the lighter, into the ledge. 75 mm deep (and at 30 m/s,
+    // through). With the contact in both, it stays within the slop.
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    w.add(Body::fixed_box({0.5f, 0.05f, 1}, {0, 0, 0}));
+    const int light = w.add(Body::solid_sphere(0.1f, 1, {0, 0.5f, 0}));
+    const int heavy = w.add(Body::solid_sphere(0.2f, 1, {0.8f, 0.5f, 0}));
+    w.add_joint(Joint::ball(w.bodies, light, heavy, {0.4f, 0.5f, 0}));
+    w.bodies[static_cast<size_t>(light)].vel = w.bodies[static_cast<size_t>(heavy)].vel = {0, -20, 0};
+    Real deepest = 0, worst = 0;
+    for (int step = 0; step < 24; ++step) {
+        w.step(kDemoDt);
+        const Body& b = w.bodies[static_cast<size_t>(light)];
+        if (std::fabs(b.pos.x) < 0.5f && b.pos.y > -0.05f) deepest = std::max(deepest, 0.15f - b.pos.y);  // (over the ledge)
+        worst = std::max(worst, gap(w, 0));
+    }
+    CHECK(deepest < 0.01f);  // (measured: 5 mm; with the contact in the exact solve only, 45 mm; in the pass only, 38)
+    CHECK(worst < 1e-3f);
+}
+
+TEST(the_position_pass_takes_a_body_into_a_fixed_one_no_further_than_the_slop_in_all) {
+    // A light ball on the floor joined to a heavy one that has been moved 0.4 m down, out of line: the pass, closing
+    // that 0.2 m a round, would take the light ball (the lighter) 13 cm down into the floor. The contact keeps it within
+    // the slop, the pass as a whole; the heavy ball comes up instead. (Each round of the tree taking the slop again, it
+    // went in twice as deep.)
+    std::vector<Body> bodies;
+    bodies.push_back(Body::fixed_box({3, 0.5f, 3}, {0, -0.5f, 0}));
+    bodies.push_back(Body::solid_sphere(0.1f, 1, {0, 0.1f, 0}));
+    bodies.push_back(Body::solid_sphere(0.2f, 8, {0.6f, 0.1f, 0}));
+    std::vector<Joint> joints{Joint::ball(bodies, 1, 2, {0.3f, 0.1f, 0})};
+    bodies[2].pos.y -= 0.4f;
+    const SolverSettings settings;
+    FixedContact floor{1, {0, 1, 0}, {}, -settings.slop, nullptr};  // touching: it may go the slop deeper, no more
+    solve_joint_positions(bodies, joints, settings, std::span<FixedContact>(&floor, 1));
+    CHECK(bodies[1].pos.y > 0.1f - settings.slop - 1e-4f);  // (measured: the slop exactly)
+    CHECK(gap_between(bodies, joints[0]) < 1e-3f);
+}
+
+TEST(contacts_with_fixed_bodies_are_solved_with_the_trees_as_contacts) {
+    // Random light bodies (boxes, balls, capsules) resting on the floor, each joined to a heavier ball moving at up to
+    // 20 m/s, solved once: some free, some hinged to the world as well (a loop through it), and some joined to the ball
+    // by a hinge its limits lock instead. What the solve must leave: no contact pulling; every joint holding, the
+    // contacts notwithstanding; the bodies' change of momentum all accounted for by the contacts' impulses (when nothing
+    // else holds them); the contacts, when free, met; and the locked hinges locked. (Hinged to the world, a box lying
+    // flat can only turn one way, and contacts on opposite sides may want it turned opposite ways: those cannot all be
+    // met, and are not counted.) Before step 33 the joints, solved after the contacts and the limits, left 74% of the
+    // free contacts closing, by up to 12 m/s (now 1.5%, by up to 0.1), and the locked hinges turning at up to 54 rad/s.
+    struct Rng {
+        std::uint32_t s;
+        float next() { return static_cast<float>((s = s * 1664525u + 1013904223u) >> 8) / static_cast<float>(1u << 24); }
+        float range(float a, float b) { return a + (b - a) * next(); }
+    };
+    int cases = 0, free = 0, short_ones = 0, hinged_short = 0;
+    Real pulled = 0, opened = 0, unaccounted = 0, worst_short = 0, hardest = 0, turning = 0;
+    for (int c = 0; c < 1200; ++c) {
+        Rng rng{static_cast<std::uint32_t>(c) * 7919u + 17u};
+        std::vector<Body> bodies;
+        bodies.push_back(Body::fixed_box({3, 0.5f, 3}, {0, -0.5f, 0}));
+        Body light = c % 3 == 0 ? Body::solid_box({rng.range(0.1f, 0.5f), rng.range(0.05f, 0.3f), rng.range(0.1f, 0.5f)}, 1, {})
+                     : c % 3 == 1 ? Body::solid_sphere(rng.range(0.1f, 0.3f), 1, {})
+                                  : Body::solid_capsule(rng.range(0.1f, 0.4f), rng.range(0.05f, 0.2f), 1, {}, Quat::from_axis_angle({0, 0, 1}, 1.5708f));
+        light.q = Quat::from_axis_angle({0, 1, 0}, rng.range(0, 6.28f)) * light.q;
+        light.pos.y = -Convex::of(light).support({0, -1, 0}).y - 0.001f;  // 1 mm into the floor
+        light.vel = {rng.range(-1, 1), rng.range(-1, 0.5f), rng.range(-1, 1)};
+        light.w = {rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2)};
+        bodies.push_back(light);
+        const Real radius = rng.range(0.1f, 0.4f);
+        const Vec3 at = light.pos + Vec3{rng.range(0.3f, 1.2f) * (rng.next() < 0.5f ? -1.0f : 1.0f), rng.range(0.3f, 1.0f), rng.range(-0.5f, 0.5f)};
+        Body heavy = Body::solid_sphere(radius, std::min(rng.range(1, 20), 100 * light.mass / (4.18879f * radius * radius * radius)), at);
+        heavy.vel = Vec3{rng.range(-1, 1), rng.range(-1, 0.3f), rng.range(-1, 1)}.normalized() * rng.range(1, 20);
+        bodies.push_back(heavy);
+        const Vec3 toward = (bodies[2].pos - bodies[1].pos).normalized();
+        const Vec3 anchor = Convex::of(bodies[1]).support(toward) + toward * rng.range(-0.05f, 0.1f);
+        const bool locked = c >= 800, hinged = c < 400;
+        std::vector<Joint> joints{Joint::ball(bodies, 1, 2, anchor)};
+        if (locked) {
+            joints[0] = Joint::hinge(bodies, 1, 2, anchor, Vec3{rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)}.normalized());
+            joints[0].enable_limit = true;
+            joints[0].lower = joints[0].upper = 0;
+        }
+        if (hinged)
+            for (const Real z : {0.2f, -0.2f}) joints.push_back(Joint::ball(bodies, -1, 1, bodies[1].pos + Vec3{0, 0.05f, z}));
+        std::vector<ContactPair> contacts(1);
+        contacts[0].a = 0;
+        contacts[0].b = 1;
+        if (!collide(bodies[0], bodies[1], contacts[0].manifold)) continue;
+        ++cases;
+        const Vec3 before = bodies[1].vel * bodies[1].mass + bodies[2].vel * bodies[2].mass;
+        SolverSettings settings;
+        settings.warm_starting = false;
+        solve_constraints(bodies, contacts, joints, kDemoDt, settings);
+        const Manifold& m = contacts[0].manifold;
+        Vec3 t[2], given;
+        tangent_basis(m.normal, t[0], t[1]);
+        Real shortest = 0;
+        for (int k = 0; k < m.count; ++k) {
+            const ContactPoint& p = m.points[k];
+            pulled = std::max(pulled, -p.normal_impulse);
+            if (!locked) hardest = std::max(hardest, p.normal_impulse / (bodies[1].mass + bodies[2].mass));  // (as a change of speed)
+            shortest = std::max(shortest, -dot(bodies[1].vel + cross(bodies[1].w, p.point - bodies[1].pos), m.normal));
+            given += m.normal * p.normal_impulse + t[0] * p.tangent_impulse[0] + t[1] * p.tangent_impulse[1];
+        }
+        hinged_short += hinged && shortest > 0.011f;
+        if (locked) turning = std::max(turning, std::fabs(dot(bodies[2].w - bodies[1].w, rotate(bodies[1].q, joints[0].local_axis_a))));
+        if (!hinged && !locked) {
+            ++free;
+            worst_short = std::max(worst_short, shortest);
+            short_ones += shortest > 0.011f;
+            unaccounted = std::max(unaccounted, (bodies[1].vel * bodies[1].mass + bodies[2].vel * bodies[2].mass - before - given).length());
+        }
+        for (const Joint& j : joints) {
+            const Vec3 pa = j.world_anchor_a(bodies), pb = j.world_anchor_b(bodies);
+            const Vec3 va = j.a < 0 ? Vec3{} : bodies[1].vel + cross(bodies[1].w, pa - bodies[1].pos);
+            const Body& B = bodies[static_cast<size_t>(j.b)];
+            opened = std::max(opened, (B.vel + cross(B.w, pb - B.pos) - va).length());
+        }
+    }
+    CHECK(cases > 1100);
+    CHECK(pulled <= 0);
+    CHECK(opened < 1e-3f);       // (measured: 0.2 mm/s; without the trees solved again after the contacts, 1.9)
+    CHECK(unaccounted < 1e-4f);
+    CHECK(short_ones * 20 < free);  // fewer than 5% of the free ones short of their targets by more than the slack
+    CHECK(worst_short < 0.3f);   // (measured: 0.1 m/s)
+    // Hinged: of those that can be met, most are (measured: 33 of 400 short; with the contacts solved without the
+    // loop's cut rows, 251); and no contact pushes absurdly hard, as two pushing against each other through the hinge
+    // did (measured: at most 542 m/s worth of the two bodies' speed, a contact near the hinge; left to sweep on, 27100;
+    // with contacts the hinge all but fixes taken in, 23060).
+    CHECK(hinged_short * 100 < 400 * 15);
+    CHECK(hardest < 2000);  // (the free and hinged only)
+    CHECK(turning < 0.02f);  // (measured: 0.007 rad/s; with the limits left out of it, 149; before step 33, 54)
+}
+
+TEST(a_hinge_locked_by_its_limits_stays_locked_with_no_contact_at_all) {
+    // Two bars joined by a hinge whose limits lock it, the second bar with a heavy ball on a ball joint at its end,
+    // flung away at 15 m/s; nothing touching them. The limits are solved in the sweeps; the joints' exact solve after
+    // them, holding the ball joint, turned the bars about the hinge, and nothing put that right. The limits are now
+    // solved with the trees too (step 33), contacts or none.
+    std::vector<Body> bodies;
+    bodies.push_back(Body::solid_box({0.3f, 0.1f, 0.1f}, 1, {0, 0, 0}));
+    bodies.push_back(Body::solid_box({0.3f, 0.1f, 0.1f}, 1, {0.6f, 0, 0}));
+    bodies.push_back(Body::solid_sphere(0.2f, 8, {1.1f, 0.3f, 0}));
+    Joint hinge = Joint::hinge(bodies, 0, 1, {0.3f, 0, 0}, {0, 0, 1});
+    hinge.enable_limit = true;
+    hinge.lower = hinge.upper = 0;
+    std::vector<Joint> joints{hinge, Joint::ball(bodies, 1, 2, {0.9f, 0.1f, 0})};
+    bodies[2].vel = {2, 15, 3};
+    std::vector<ContactPair> contacts;
+    SolverSettings settings;
+    settings.warm_starting = false;
+    solve_constraints(bodies, contacts, joints, kDemoDt, settings);
+    CHECK(std::fabs(bodies[1].w.z - bodies[0].w.z) < 0.01f);  // (measured: under 10^-5 rad/s; before, 0.097)
+}
+
+TEST(a_door_hinged_on_the_face_of_its_post_is_not_pushed_into_it) {
+    // A door 12 cm thick hinged on the face of its post, pushed by a ball: it cannot turn either way without one of its
+    // edges going into the post, and it is wedged. Seen through the hinge, the post's contacts, so near the axis, answer
+    // an impulse a ten thousandth as much as they would were the door free; left out as fixed by the hinge (at a
+    // thousandth), and before step 33, the door was pushed 27 mm into the post and swung open.
+    World w;
+    w.allow_sleep = false;
+    w.add(Body::fixed_box({20, 0.5f, 20}, {0, -0.5f, 0}));
+    w.add(Body::fixed_box({0.1f, 1.5f, 0.1f}, {-5, 1.5f, 0}));
+    const int door = w.add(Body::solid_box({1.0f, 1.3f, 0.06f}, 1, {-3.9f, 1.5f, 0}));
+    Joint hinge = Joint::hinge(w.bodies, -1, door, {-4.9f, 1.5f, 0}, {0, 1, 0});
+    hinge.enable_limit = true;
+    hinge.lower = -1.75f;
+    hinge.upper = 1.75f;
+    w.add_joint(hinge);
+    Body push = Body::solid_sphere(0.4f, 1, {-3.4f, 1.6f, 4});
+    push.vel = {0, 1, -9};
+    w.add(push);
+    Real deepest = 0;
+    for (int step = 0; step < 240; ++step) {
+        w.step(kDemoDt);
+        for (const ContactPair& c : w.contacts())
+            if ((c.a == 1 && c.b == door) || (c.a == door && c.b == 1))
+                for (int k = 0; k < c.manifold.count; ++k) deepest = std::max(deepest, c.manifold.points[k].depth);
+    }
+    CHECK(deepest < 0.01f);  // (measured: not at all; at a thousandth, 27 mm)
+}

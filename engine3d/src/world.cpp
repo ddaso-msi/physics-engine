@@ -199,7 +199,7 @@ void World::step(Real dt) {
     // the sweep is run again, from where each body began the step to where the joints have left it: what the pass
     // put through a wall is stopped short of it (and a joint held open against a wall stays so, for the contacts to
     // settle). A body already stopped the first time is not moved again: it is just short of the wall.
-    solve_joint_positions(bodies, joints, solver);
+    solve_joint_positions(bodies, joints, solver, fixed_contacts());
     double joints_ms = 0;
     lap(joints_ms);
     stats_.ms_movement += joints_ms;
@@ -233,7 +233,7 @@ void World::step(Real dt) {
             held_joints_.clear();
             for (const Joint& j : joints)  // (copies: the pass only moves bodies)
                 if (in_held_island(j.a) || in_held_island(j.b)) held_joints_.push_back(j);
-            solve_joint_positions(bodies, held_joints_, solver);
+            solve_joint_positions(bodies, held_joints_, solver, fixed_contacts());
             for (const Held& h : held_) {
                 Body& b = bodies[h.index];
                 b.type = BodyType::Dynamic;
@@ -276,6 +276,50 @@ void World::step(Real dt) {
     }
     stats_.awake_bodies = static_cast<size_t>(std::count_if(bodies.begin(), bodies.end(), [](const Body& b) { return b.is_active(); }));
     lap(stats_.ms_sleep);
+}
+
+// This step's contacts of jointed bodies with fixed ones, for the joint position pass (step 33): rows along the normal
+// out of the fixed body, each with how far the pass may move the body along it: no deeper than the slop, or than it
+// is already. Each pair the narrow phase found touching is looked at again where the bodies are now, after their move
+// and the sweep. Still overlapping, a row per point of its contact. Apart (the velocity solve will often have lifted a
+// body off what it landed on), one row between the closest points, which the pass may close by the gap and the slop:
+// with no row there, a ball dragged along a ledge was pulled 6 cm into it by the pass, and the sweep let it stay 2.5 cm
+// deeper every step until it came out underneath. Apart by more than kNear, none. (Rows from the narrow phase's
+// contact instead held a ball that had slid off the end of a ledge to the ledge's top as if it went on, and its joint
+// was left open, by 9 cm at 60 m/s.)
+std::span<FixedContact> World::fixed_contacts() {
+    fixed_contacts_.clear();
+    if (joints.empty()) return fixed_contacts_;
+    jointed_.assign(bodies.size(), 0);
+    for (const Joint& j : joints)
+        for (const int b : {j.a, j.b})
+            if (b >= 0) jointed_[static_cast<size_t>(b)] = 1;
+    for (const ContactPair& pair : contacts_) {
+        if (pair.dormant) continue;
+        const Body& a = bodies[static_cast<size_t>(pair.a)];
+        const Body& b = bodies[static_cast<size_t>(pair.b)];
+        const bool a_fixed = a.type != BodyType::Dynamic, b_fixed = b.type != BodyType::Dynamic;
+        if (a_fixed == b_fixed) continue;
+        const int moving = a_fixed ? pair.b : pair.a;
+        const Body& body = bodies[static_cast<size_t>(moving)];
+        if (!jointed_[static_cast<size_t>(moving)] || !body.is_active()) continue;
+        constexpr Real kNear = static_cast<Real>(0.25);  // (more than the pass moves a body in one round)
+        const ClosestResult apart = closest(Convex::of(a), Convex::of(b), /*with_points=*/true);
+        if (apart.distance > kNear) continue;
+        if (apart.distance > 0) {
+            const Vec3 out = a_fixed ? apart.normal : -apart.normal, at = a_fixed ? apart.point_b : apart.point_a;
+            fixed_contacts_.push_back({moving, out, cross(at - body.pos, out), -(apart.distance + solver.slop), nullptr});
+            continue;
+        }
+        Manifold now;
+        if (!collide_pair(a, b, now)) continue;
+        const Vec3 out = a_fixed ? now.normal : -now.normal;
+        for (int k = 0; k < now.count; ++k) {
+            const ContactPoint& cp = now.points[k];
+            fixed_contacts_.push_back({moving, out, cross(cp.point - body.pos, out), std::min(Real(0), cp.depth - solver.slop), nullptr});
+        }
+    }
+    return fixed_contacts_;
 }
 
 // The 2D engine's sweep (see phys/world.cpp for the full reasoning), in 3D. A body that moves or turns far

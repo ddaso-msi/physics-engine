@@ -274,10 +274,12 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
             break;
         }
         case Scene::Machines: {
-            // A door on a vertical hinge that opens 100 degrees either way, pushed by a ball.
+            // A door on a vertical hinge that opens 100 degrees either way, pushed by a ball. The hinge stands 7 cm out
+            // from the post: on the post's face, as it was, the door (12 cm thick) could not turn either way without an
+            // edge going into the post, and once the contacts held it out (step 33) it stayed shut.
             w.add(Body::fixed_box({0.1f, 1.5f, 0.1f}, {-5, 1.5f, 0}));
-            const int door = w.add(crate({-3.9f, 1.5f, 0}, {1.0f, 1.3f, 0.06f}));
-            Joint hinge = Joint::hinge(w.bodies, -1, door, {-4.9f, 1.5f, 0}, {0, 1, 0});
+            const int door = w.add(crate({-3.83f, 1.5f, 0}, {1.0f, 1.3f, 0.06f}));
+            Joint hinge = Joint::hinge(w.bodies, -1, door, {-4.83f, 1.5f, 0}, {0, 1, 0});
             hinge.enable_limit = true;
             hinge.lower = -1.75f;
             hinge.upper = 1.75f;

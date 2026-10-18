@@ -36,6 +36,19 @@
 // A lambda, A found by one tree solve per cut row with that row's impulse on the right (so the tree's own rows still
 // hold), and the cut rows' speeds by W lambda, W = J_cut A. After each tree solve, lambda = W^-1 (what the cut rows
 // still need), and A lambda is applied. A tree with more than kMaxCutRows of them is left to Gauss-Seidel.
+//
+// Contacts with fixed bodies (step 33). The exact solve, coming after the contacts, can undo what they did: a light
+// body joined to a heavy one, the heavy one falling past the end of a ledge the light one is on, is given the heavy
+// one's speed, into the ledge, and was dragged into it a quarter of its size a step (the most the sweep allows) until
+// it came out underneath. The joints' limits and cones, solved in the sweeps too, were undone the same way. So after
+// the solve, a tree that has left any of its contacts with fixed bodies, or any of its limits and cones, more than
+// kTouchSlack short of their targets has all of them solved with it. Each is a row on one or two of the tree's bodies
+// (a contact, a row through the world), and how the tree answers an impulse on it is found as for a cut row; but it
+// may only push. The joints come first: the tree's cut rows are eliminated, so that these rows are solved against the
+// tree with its loops closed and the joints hold whatever they get; then these rows by projected Gauss-Seidel on that
+// small system (see touch_tree). The position pass does the same for poses, for the contacts: a correction that would
+// push one further in than it may go (see World::fixed_contacts) is put back the same way, the rest of the tree moving
+// instead.
 #include <phys3d/joints.hpp>
 
 #include <cstdint>
@@ -60,13 +73,17 @@ public:
     // One exact solve of the tree rows from the bodies' current velocities: changes the velocities and adds to
     // the rows' accumulated impulses.
     void solve(std::vector<JointRow>& rows) { pass(rows, false, 0, 0, nullptr); }
+    // After solve: the contacts of the trees' bodies with fixed bodies, and the trees' limits and cones, solved with
+    // the trees (see above). Changes the velocities, and adds to the rows' and the contacts' impulses.
+    // Returns whether it changed anything.
+    bool touch(std::vector<JointRow>& rows, std::span<FixedContact> contacts, bool positions = false);
     // The same solve for the rows' position errors (rows built for the position pass), each limited to the
     // most a row may correct at once: moves and turns the bodies so as to remove them, to first order.
     // `largest[k]` receives, for each joint k taken into a tree, the largest error any row of its tree had
     // (metres or radians).
-    void correct(std::vector<JointRow>& rows, Real max_linear, Real max_angular, std::vector<Real>& largest) {
-        pass(rows, true, max_linear, max_angular, &largest);
-    }
+    // Contacts with fixed bodies (step 33) are kept from being pushed further in than they may go.
+    void correct(std::vector<JointRow>& rows, Real max_linear, Real max_angular, std::vector<Real>& largest,
+                 std::span<FixedContact> contacts = {});
 
 private:
     // (The arrays are left uninitialised, by the empty constructors: each node is a kilobyte, and clearing two
@@ -123,6 +140,8 @@ private:
     };
     void solve_tree(int tree);  // one solve of a single tree, from the y already in vec_, leaving x there
     void close_loops(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular);
+    // touch() for one tree: its contacts are by_tree_[first .. end).
+    bool touch_tree(std::vector<JointRow>& rows, std::span<FixedContact> contacts, int tree, size_t first, size_t end, bool positions);
     int add_node(int size, Body* body);  // returns its index
     void pass(std::vector<JointRow>& rows, bool positions, Real max_linear, Real max_angular, std::vector<Real>* largest);
     // The block coupling child c to its parent: H[c][parent], size(c) x size(parent).
@@ -142,6 +161,26 @@ private:
     std::vector<int> body_node_, adjacency_, adjacent_start_, piece_, post_, step_of_;
     std::vector<std::uint8_t> seen_;
     std::vector<std::pair<int, std::size_t>> walk_;
+    // touch(): the contacts by tree (tree, index into the contacts), and for one tree those taken, how its nodes
+    // answer each, and where each node starts in such an answer.
+    // A row that may only push, on one or two of the tree's bodies: a contact with a fixed body, or (for velocities)
+    // one of the tree's joints' limits or cones.
+    struct Touching {
+        int contact;   // index into the contacts, or -1 for a joint's row
+        int row;       // index into the rows, or -1 for a contact
+        int step[2];   // the Step of each body it acts on, -1 for none
+        double J[2][6];
+        double short_by;
+    };
+    std::vector<int> first_;  // build()'s `first`: each joint's rows
+    std::vector<std::uint8_t> one_sided_;  // per tree: whether any of its joints has a limit or cone row
+    const Body* base_ = nullptr;  // the bodies build() was given
+    std::vector<std::pair<int, int>> by_tree_;
+    std::vector<Touching> touching_;
+    std::vector<Scalar> touch_response_;
+    std::vector<int> touch_offset_;
+    std::vector<Vec3> touch_pos_;  // per body, for the position pass: where it was before the correction
+    std::vector<Quat> touch_q_;
 };
 
 }  // namespace phys3d
