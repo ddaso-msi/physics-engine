@@ -89,10 +89,17 @@ void Pendulum::press(const Ray& ray) {
 
 void Pendulum::drag(const Ray& ray) {
     if (!dragging_) return;
-    // Where the ray meets the sphere the rod sweeps; failing that, the point of the ray closest to it.
+    // Where the ray meets the sphere the rod sweeps; failing that, the point of the ray closest to it. The
+    // ray goes in through the near side of the sphere and out through the far side: of the two, take the one
+    // nearer the weight as it is now, so the weight follows the pointer over the back of the sphere too.
     const Vec3 m = ray.origin - kPivot;
     const Real b = dot(m, ray.dir), c = m.length_sq() - kRod * kRod, disc = b * b - c;
-    const Vec3 p = disc >= 0 ? ray.at(-b - std::sqrt(disc)) : ray.at(-b);
+    Vec3 p = ray.at(-b);
+    if (disc >= 0) {
+        const Vec3 near_side = ray.at(-b - std::sqrt(disc)), far_side = ray.at(-b + std::sqrt(disc));
+        const Vec3 now = bob_position(tilt, heading);
+        p = distance(near_side, now) <= distance(far_side, now) ? near_side : far_side;
+    }
     const Vec3 d = p - kPivot;
     const Real horizontal = std::sqrt(d.x * d.x + d.z * d.z);
     set_pull(std::atan2(horizontal, -d.y), horizontal > 1e-4f ? std::atan2(d.z, -d.x) : heading);

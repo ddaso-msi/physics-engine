@@ -22,6 +22,7 @@
 //   --at X Y Z         move the cursor onto a world point (as seen by the camera now)
 //   --glide-at X Y Z N the same, over N steps
 //   --down / --up      press / release the left button wherever the cursor is
+//   --sweep DYAW DPITCH N   turn the camera that far over N steps
 #include "hud.hpp"
 #include "scene.hpp"
 
@@ -464,6 +465,15 @@ bool run_script(App& app, SDL_Renderer* ren, int argc, char** argv) {
                 t = t * t * (3.0f - 2.0f * t);
                 move(app, x0 + (to.x - x0) * t, y0 + (to.y - y0) * t);
                 if (n > 1 && !tick(app, ren)) return false;
+            }
+        } else if (is(a, "--sweep")) {
+            const Real dyaw = number(i + 1), dpitch = number(i + 2);
+            const int n = std::max(1, static_cast<int>(number(i + 3)));
+            i += 3;
+            for (int s = 0; s < n; ++s) {
+                app.camera.orbit(dyaw / static_cast<Real>(n), dpitch / static_cast<Real>(n));
+                if (app.pressed) app.level->drag(pointer_ray(app.camera, app.mouse_x, app.mouse_y));
+                if (!tick(app, ren)) return false;
             }
         } else if (is(a, "--down")) {
             press(app, app.mouse_x, app.mouse_y);
