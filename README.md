@@ -20,6 +20,8 @@ demo/     SDL3 debug renderer and scenes
 tests/    dependency-free test runner
 scenes/   library of gallery scenes (Newton's cradle, rag doll, car) shared by the demo and the tests
 bench/    broad phase / World::step timings (build the release preset)
+game3d/   Physics Puzzle Lab 3D: a puzzle game built on the 3D engine (see below)
+tests_game3d/  tests that play its levels headless
 ```
 
 ## Build
@@ -36,6 +38,58 @@ ctest --preset debug
 
 Recording controls in `demo`: `H` hides or shows all on-screen text, `Backspace` reloads the current scene
 from its initial state (solver, sleep, CCD and broad phase toggles are left as set), `Tab` pauses and resumes.
+
+## Physics Puzzle Lab 3D
+
+A small puzzle game on the 3D engine: five levels, each a physical problem you solve by experiment.
+Nothing is scripted; every outcome is whatever `phys3d::World::step` produces.
+
+```bash
+cmake --preset release && cmake --build --preset release
+./build/release/game3d/puzzle_lab_3d
+```
+
+| # | Level | What you do | Solved when |
+|---|---|---|---|
+| 1 | Knock It Down | point the mouse to aim, fire four balls | all 14 crates of a three-layer pyramid are off the platform |
+| 2 | Bridge Builder | join connection points with up to 12 hinged beams | the car reaches the far cliff without falling |
+| 3 | Pendulum Smash | pull a weight back to any point on its sphere: how far, and which way | the ball it hits comes to rest in the bin |
+| 4 | Chain Reaction | place three spare dominoes in a gap in a curved line, turned to follow it | the chain tips the last ball into the bin |
+| 5 | Impossible Tower | stack seven mismatched pieces on a pad, turning or standing them on end | the top stays above 4.5 m for 5 s, then rests |
+
+Controls: left mouse acts (aim and fire, drag a piece, pull the weight), right-drag turns the camera, the
+wheel zooms, `V` resets the view. `Space` run / back to setup, `R` reset, `Tab` pause, `Q`/`E` turn a held
+piece, `F` stands it on end, `N` next level, `H` help, `C` contact points, `Esc` cancel then menu.
+
+How it is put together, and what is new compared with a 2D version:
+
+- `game3d/` is a library (`phys_game3d`) with no SDL in it: the `Level` base class (a setup phase in which
+  the world is built but frozen, a run phase of fixed 1/120 s steps), the win conditions (`objectives.hpp`),
+  the rules for placing loose pieces (`pieces.hpp`) and ray casting (`raycast.hpp`). The engine has no ray
+  queries, so the game has its own, against spheres, boxes, capsules and hulls; every mouse action in a
+  level is a ray from the camera.
+- A held piece hangs where it would land: each time the pointer moves, the piece is dropped from high above
+  the spot the ray meets until it is about to touch something. Let go and that is where it stays.
+- A level never edits a world in place. Bodies are identified by index and cannot be removed, so every
+  change (moving a piece, adding a beam, reset) rebuilds a fresh `World`. Reset is therefore exact, and the
+  same setup always gives the same result.
+- `game3d/app/` is the SDL3 program. It draws solid, lit surfaces with `SDL_RenderGeometry` alone: every
+  face is cut into triangles and drawn back to front, faces turned away are skipped, and large faces are cut
+  into tiles so they sort sensibly against small bodies. Bodies get soft shadows on the ground. The camera is
+  the 3D demo's orbit camera (`demo3d/camera.hpp`, tested in `tests3d`).
+- `tests_game3d/` plays every level without a window: winning and losing setups, limits, rays, reset and
+  replays.
+
+What the levels lean on in the engine: continuous collision only covers static bodies, so the launch speed
+is capped below a crate's width per step; there is no collision filtering, so beams that meet at a point
+stop short of it (their hinges stay at the point); and there are hinges but no rolling resistance, so a
+ball in a bin may never be quite still and "in the bin for long enough" is what counts. As in 2D, the
+right cliff has no fixed point at road level, so only a triangulated bridge stands: the smallest is ten
+beams, and the engine's exact joint solver keeps every hinge within a millimetre under the car.
+
+Checking without a display: the game takes a script of arguments (see the top of `game3d/app/main.cpp`),
+for example `--level 4 --at 1 0.5 1.2 --down --at 2.6 0.5 1.7 --key left --up --key run --steps 900
+--capture out.bmp` with `SDL_VIDEODRIVER=dummy`.
 
 ## Stage 2: integration
 
