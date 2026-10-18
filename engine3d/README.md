@@ -1474,6 +1474,35 @@ their limit taken in; the loops back to dropping rows: each caught. Not caught: 
 found where the pass moves a body far enough to need it) and that sweep over every body rather than the held islands'
 (time only).
 
+## Step 32: the plank bridge
+
+Step 31 left the demo's plank bridge (scene 6) 35 mm open. Two things were wrong with it, one in the scene and one in
+the engine:
+
+- **It was pulled straight.** Seven planks a metre long pinned between two points seven metres apart could only sag
+  under the crate by stretching. It now hangs with slack, three planks sloping down, one level and three up, as the rope
+  bridge has since step 28. That halved it: 19 mm.
+- **It was not solved exactly at all.** Each plank is joined to the next, and the end ones to the world, by two ball
+  joints side by side, so that they cannot twist. The second of each pair closes a loop, three cut rows; with the far
+  end, 27 in all, and a tree's loops could have at most 24 (step 27): over that, all of them were left to sweeping. Now
+  64. With the slack, the scene's worst gap is 0.32 mm over eight seconds (0.0011 mm at rest), and nothing is over 1 mm
+  (247 steps of it were).
+
+| demo scene 6, 8 s | worst joint gap | steps over 1 mm |
+|---|---|---|
+| step 31 | 35.1 mm | 783 |
+| with slack | 19.0 mm | 247 |
+| with slack, 64 cut rows | 0.32 mm | 0 |
+
+Cost: what the rows cost grows with the cube of their number, and only trees that have them pay. An 18-plank bridge
+joined the same way (60 cut rows) steps in 0.22 ms solved exactly, against 0.06 ms left to sweeping, and holds within
+0.05 mm against 26. The scene itself got faster (8 s in 0.42 s rather than 0.60), and the chains benchmark, which has
+no loops, is unchanged.
+
+Test (1, 299 in total): the slack bridge of twice-pinned planks, with a crate dropped on it, holds within 1 mm
+(measured: 0.007 mm; with 24 rows at most, 19 mm). Deliberate breakages: the limit back to 24, and at 26 (one short):
+both caught.
+
 ## Planned next
 
 To be decided.

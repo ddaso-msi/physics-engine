@@ -242,17 +242,23 @@ void load_scene(Scene scene, World& w, Camera& cam, Lcg& rng) {
             const int weight = w.add(Body::solid_sphere(0.45f, 1, top + Vec3{4.8f + 0.45f, 0, 0}));
             w.add_joint(Joint::ball(w.bodies, previous, weight, top + Vec3{4.8f, 0, 0}));
 
-            // A plank bridge pinned to the world at both ends, with a load dropped on it.
+            // A plank bridge pinned to the world at both ends, with a load dropped on it. It hangs with some slack, three
+            // planks sloping down, one level, three up: pulled straight between its pins, it could only sag under the
+            // load by stretching, and its joints stood 35 mm open.
             previous = -1;
-            const Vec3 left{-3.5f, 2.5f, 3};
+            const Real slope = 0.25f;
+            Vec3 at{-3.5f, 2.5f, 3};
             for (int i = 0; i < 7; ++i) {
-                const int plank = w.add(crate(left + Vec3{0.5f + static_cast<float>(i), 0, 0}, {0.5f, 0.06f, 0.6f}));
+                const Real angle = i < 3 ? -slope : i > 3 ? slope : 0;
+                const Vec3 along{std::cos(angle), std::sin(angle), 0};
+                const int plank = w.add(crate(at + along * 0.5f, {0.5f, 0.06f, 0.6f}, Quat::from_axis_angle({0, 0, 1}, angle)));
                 for (float side : {-0.5f, 0.5f})  // two pins per joint, so the planks cannot twist freely
-                    w.add_joint(Joint::ball(w.bodies, previous, plank, left + Vec3{static_cast<float>(i), 0, side}));
+                    w.add_joint(Joint::ball(w.bodies, previous, plank, at + Vec3{0, 0, side}));
                 previous = plank;
+                at += along;
             }
-            for (float side : {-0.5f, 0.5f}) w.add_joint(Joint::ball(w.bodies, previous, -1, left + Vec3{7, 0, side}));
-            w.add(crate(left + Vec3{3.5f, 1.5f, 0}, {0.4f, 0.4f, 0.4f}));
+            for (float side : {-0.5f, 0.5f}) w.add_joint(Joint::ball(w.bodies, previous, -1, at + Vec3{0, 0, side}));
+            w.add(crate({(at.x - 3.5f) / 2, 4, 3}, {0.4f, 0.4f, 0.4f}));
 
             // A ball on a spring.
             const int bob = w.add(Body::solid_sphere(0.4f, 1, {4, 4.5f, -2}));

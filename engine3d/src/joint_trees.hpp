@@ -104,7 +104,11 @@ private:
         int joint, size, rows[6], body[2];
     };
     // A tree's cut rows, put back through it (see above).
-    static constexpr int kMaxCutRows = 24;
+    // (24 until step 32. Two ball joints side by side, a common way to join two bodies so they cannot twist, close a
+    // loop each, three cut rows a pair: a bridge of seven planks joined so had 27, and was all of it left to sweeping.
+    // Their cost grows with the cube of their number: a bridge of 18 planks so joined, 60 cut rows, steps in 0.22 ms
+    // where left to sweeping it took 0.06, and holds within 0.05 mm where it opened 26. A tree with none pays nothing.)
+    static constexpr int kMaxCutRows = 64;
     struct Loop {
         int tree = 0, size = 0;
         int rows[kMaxCutRows];

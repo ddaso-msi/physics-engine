@@ -1680,3 +1680,34 @@ TEST(a_held_body_keeps_the_joints_to_the_world_of_what_comes_to_it) {
     CHECK(worst_pivot < 1e-3f);   // (measured: under a micrometre)
     CHECK(worst_excess < 5e-4f);  // (measured: under a micrometre; dropping a row, 15 mm)
 }
+
+// ---- Step 32: more rows put back through a tree ----
+
+TEST(a_bridge_of_twice_pinned_planks_is_solved_exactly_with_its_27_cut_rows) {
+    // Seven planks hung with slack between two points, each joined to the next (and the ends to the world) by two ball
+    // joints, so they cannot twist: the second pin of each pair closes a loop, and so does the far end, 27 cut rows in
+    // all. Over the 24 the trees took, the whole loop was left to sweeping, and a crate dropped on it opened a joint
+    // by 19 mm.
+    World w;
+    w.allow_sleep = false;
+    const Real slope = 0.25f;
+    Vec3 at{-3.5f, 2.5f, 0};
+    int previous = -1;
+    for (int i = 0; i < 7; ++i) {
+        const Real angle = i < 3 ? -slope : i > 3 ? slope : 0;
+        const Vec3 along{std::cos(angle), std::sin(angle), 0};
+        const int plank = w.add(Body::solid_box({0.5f, 0.06f, 0.6f}, 1, at + along * 0.5f, Quat::from_axis_angle({0, 0, 1}, angle)));
+        for (const Real side : {-0.5f, 0.5f}) w.add_joint(Joint::ball(w.bodies, previous, plank, at + Vec3{0, 0, side}));
+        previous = plank;
+        at += along;
+    }
+    for (const Real side : {-0.5f, 0.5f}) w.add_joint(Joint::ball(w.bodies, previous, -1, at + Vec3{0, 0, side}));
+    const int load = w.add(Body::solid_box({0.4f, 0.4f, 0.4f}, 1, {(at.x - 3.5f) / 2, 4, 0}));
+    Real worst = 0;
+    for (int step = 0; step < 240; ++step) {
+        w.step(kDemoDt);
+        for (int k = 0; k < static_cast<int>(w.joints.size()); ++k) worst = std::max(worst, gap(w, k));
+    }
+    CHECK(w.bodies[static_cast<size_t>(load)].pos.y > 1.5f);  // (it landed on the bridge, and is held there)
+    CHECK(worst < 1e-3f);  // (measured: 0.007 mm; with 24 rows at most, 19 mm)
+}
