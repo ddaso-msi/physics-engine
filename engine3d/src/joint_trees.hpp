@@ -22,6 +22,13 @@
 // cannot turn about some axis (its mass matrix has no inverse). Gauss-Seidel sweeps every row, in the trees too; the
 // trees' exact solve comes at the end of the last sweep.
 //
+// Except in the position pass, where a limit or cone that is past its limit is taken in with the rest (step 31): it
+// has an error to remove, as they do, and removing them one after the other undid each other. Turning a thigh back
+// inside its cone swings the hip's anchor open, and closing the anchor again (the tree's answer, the least motion
+// that closes it) turns the thigh back out: a ragdoll's hip went round that circle four times a step, 6% closer each
+// time. Solved together, both are met at once. (A joint's rows still number at most six: a ball joint's three and its
+// cone; a hinge's five and one of its two limits, which cannot both be passed at once; a slider's likewise.)
+//
 // Loops (step 27): a ring of joints, or a structure fixed to the world in two places (a loop through the world), is
 // not a tree. Each loop is cut at one joint, chosen as the joints are taken in turn: a joint that would join two
 // bodies already joined (or a body to the world when it already is) is a cut joint, and the rest are trees. The cut
@@ -45,9 +52,11 @@ public:
 
     // Finds the trees among `rows` (built for the velocity pass; a joint's rows are rows[first[k] ..
     // first[k + 1]), the last entry being rows.size()) and factors them for the bodies' present poses.
-    // If `taken` is given it receives, for each joint k, whether its rows were taken into a tree.
+    // If `taken` is given it receives, for each joint k, whether its rows were taken into a tree. With `violated`
+    // (for the position pass) a one-sided row that is past its limit is taken too, as if it held both ways, and
+    // its joint's entry in `taken` is 2 rather than 1.
     void build(const std::vector<Body>& bodies, const std::vector<JointRow>& rows, const std::vector<int>& first,
-               std::vector<std::uint8_t>* taken = nullptr);
+               std::vector<std::uint8_t>* taken = nullptr, bool violated = false);
     // One exact solve of the tree rows from the bodies' current velocities: changes the velocities and adds to
     // the rows' accumulated impulses.
     void solve(std::vector<JointRow>& rows) { pass(rows, false, 0, 0, nullptr); }
@@ -104,7 +113,8 @@ private:
         Scalar J[kMaxCutRows][2][6];
         size_t response = 0;  // where A starts in response_: column by column, each the tree's x in its step order
         size_t length = 0;    // floats in one column
-        std::vector<double> L;  // W = L L^T, over the rows not dropped
+        std::vector<double> W;  // the cut rows' speeds answer an impulse lambda on them by W lambda
+        std::vector<double> L;  // N = L L^T, N = (W W) over the rows not dropped (see close_loops)
         std::uint8_t dropped[kMaxCutRows];  // rows the others (with the tree) already imply: given no impulse
     };
     void solve_tree(int tree);  // one solve of a single tree, from the y already in vec_, leaving x there

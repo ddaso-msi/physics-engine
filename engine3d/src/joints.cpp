@@ -440,12 +440,12 @@ void JointSolver::correct_trees(std::vector<Body>& bodies, Real max_linear, Real
     std::vector<int> first = first_row_;
     first.push_back(static_cast<int>(rows_.size()));
     std::vector<std::uint8_t> by_position;
-    trees_->build(bodies, rows_, first, &by_position);
+    trees_->build(bodies, rows_, first, &by_position, /*violated=*/true);
     std::vector<Real> largest(by_position.size(), 0);
     trees_->correct(rows_, max_linear, max_angular, largest);
     for (size_t k = 0; k < by_position.size(); ++k)
         if (by_position[k]) {
-            taken[static_cast<size_t>(joint_of_[k])] = 1;
+            taken[static_cast<size_t>(joint_of_[k])] = by_position[k];
             error[static_cast<size_t>(joint_of_[k])] = largest[k];
         }
 }
@@ -456,7 +456,7 @@ void JointSolver::store() {
 
 void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints, const SolverSettings& settings) {
     JointSolver solver, all;
-    std::vector<std::uint8_t> taken, sub_taken;
+    std::vector<std::uint8_t> taken, sub_taken, limit_done;
     std::vector<Real> error, sub_error;
     std::vector<size_t> again, still;  // the joints of trees that need another pass
     std::vector<Joint> sub;
@@ -477,6 +477,7 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
             again.clear();
             for (size_t j = 0; j < joints.size(); ++j)
                 if (taken[j] && error[j] > kTreesSettled) again.push_back(j);
+            limit_done.assign(taken.begin(), taken.end());
         } else if (!again.empty()) {
             sub.clear();
             for (const size_t j : again) sub.push_back(joints[j]);  // (copies: the pass only moves bodies)
@@ -485,23 +486,30 @@ void solve_joint_positions(std::vector<Body>& bodies, std::vector<Joint>& joints
             sub_error.assign(sub.size(), 0);
             all.correct_trees(bodies, kMaxLinearCorrection, kMaxAngularCorrection, sub_taken, sub_error);
             still.clear();
-            for (size_t i = 0; i < again.size(); ++i)
+            limit_done.assign(joints.size(), 0);
+            for (size_t i = 0; i < again.size(); ++i) {
                 if (sub_taken[i] && sub_error[i] > kTreesSettled) still.push_back(again[i]);
+                limit_done[again[i]] = sub_taken[i];
+            }
             again.swap(still);
+        } else {
+            limit_done.assign(joints.size(), 0);
         }
         for (size_t index = 0; index < joints.size(); ++index) {
             Joint& joint = joints[index];
-            // A joint in a tree is done, but for its one-sided rows (a limit, the cone), which the trees leave.
-            // Those, and every row of the other joints, one ROW at a time, each measured from the poses as they
-            // are right now. A joint's rows share its bodies, so correcting one changes the error of the others:
-            // closing a hinge's point turns the body, which changes its angle, and turning it back to a limit
-            // moves the point. Corrected all together from one measurement they overshoot against each other and
-            // never settle. Each row is measured afresh, and only that row is built. (Not once more after the
-            // last: a joint has the same rows whatever its pose, except that a ball joint's cone row is left out
-            // while the two axes are exactly in line, and a row added that way would have no error to correct.)
-            // The exception is the three rows of an anchor point, corrected together (correct_anchor, above), in
-            // the place they have among the joint's rows.
+            // A joint in a tree is done, but for its one-sided rows (a limit, the cone): the trees take one only if it
+            // was past its limit when they were built (step 31), and their correction can push another past. (By about
+            // as much as it corrected, so not far: a tree that gets no second pass corrected less than a millimetre.)
+            // Those, and every row of the other joints, one ROW at a time, each measured from the poses as they are
+            // right now. A joint's rows share its bodies, so correcting one changes the error of the others: closing a
+            // hinge's point turns the body, which changes its angle, and turning it back to a limit moves the point.
+            // Corrected all together from one measurement they overshoot against each other and never settle. Each row
+            // is measured afresh, and only that row is built. (Not once more after the last: a joint has the same rows
+            // whatever its pose, except that a ball joint's cone row is left out while the two axes are exactly in
+            // line, and a row added that way would have no error to correct.) The exception is the three rows of an
+            // anchor point, corrected together (correct_anchor, above), in the place they have among the joint's rows.
             const bool in_tree = taken[index] != 0;
+            if (limit_done[index] == 2) continue;  // (its limit was corrected with its tree, this pass: once is enough)
             if (in_tree && !((joint.type == JointType::Ball && joint.enable_cone) ||
                              ((joint.type == JointType::Hinge || joint.type == JointType::Slider) && joint.enable_limit)))
                 continue;

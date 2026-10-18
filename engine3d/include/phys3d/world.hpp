@@ -106,7 +106,8 @@ public:
     const DynamicTree& broadphase_tree() const { return tree_.tree(); }
 
 private:
-    void continuous_collision();
+    // Sweeps every moving body, or only those marked in `only`.
+    void continuous_collision(const std::vector<std::uint8_t>* only = nullptr);
     // The narrow phase, by whichever method `narrowphase` selects.
     bool collide_pair(const Body& a, const Body& b, Manifold& out, GjkCache* cache = nullptr) const {
         return narrowphase == NarrowPhase::Convex ? collide_convex(Convex::of(a), Convex::of(b), out, cache) : collide(a, b, out, cache);
@@ -115,6 +116,15 @@ private:
     std::vector<ContactPair> contacts_;
     std::vector<Vec3> prev_pos_;  // poses before this step's movement, for the continuous pass
     std::vector<Quat> prev_q_;
+    std::vector<std::uint8_t> stopped_;  // per body: whether the last continuous pass stopped it
+    struct Held {
+        size_t index;
+        Real inv_mass;
+        Mat3 inv_inertia_body;
+    };
+    std::vector<Held> held_;  // bodies held still for a joint position pass, and what they were
+    std::vector<std::uint8_t> island_held_;  // per island root: whether it has one (then per body: whether in one)
+    std::vector<Joint> held_joints_;         // copies of those islands' joints
     std::vector<std::uint8_t> island_awake_;
     std::vector<Real> island_still_;
     StepStats stats_;

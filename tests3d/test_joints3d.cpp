@@ -1578,7 +1578,8 @@ TEST(a_jointed_pair_fired_at_a_thin_wall_neither_goes_through_nor_comes_far_apar
     // Two balls joined, fired at 300 m/s at a wall 10 cm thick: the sweep stops each short of it, pulling it back along
     // its path, which opens the joint. The joint position pass runs after the sweep, and closes what it can; but
     // closing it pulled the front ball into the wall, and on through it the next step, until the sweep is run again
-    // after the pass.
+    // after the pass. That sweep stops the front ball again, and (step 31) the pass run once more with it held brings
+    // the other to it.
     World w;
     w.gravity = {};
     w.allow_sleep = false;
@@ -1593,5 +1594,89 @@ TEST(a_jointed_pair_fired_at_a_thin_wall_neither_goes_through_nor_comes_far_apar
         CHECK(w.bodies[static_cast<size_t>(a)].pos.x < 2.95f && w.bodies[static_cast<size_t>(b)].pos.x < 2.95f);  // never through
         worst = std::max(worst, gap(w, 0));
     }
-    CHECK(worst < 0.4f);  // (measured: 0.25 m; with the pass before the sweep, 0.5)
+    CHECK(worst < 1e-3f);  // (measured: under a micrometre; without the held pass 0.25 m, with the pass before the sweep 0.5)
+}
+
+// ---- Step 31: what the sweep stops is held, and a limit past its limit is corrected with its tree ----
+
+TEST(a_body_the_sweep_stops_is_held_and_its_joint_closed_by_the_rest) {
+    // A light ball and one eight times heavier, joined, falling at 20 m/s side by side: a ledge under the light one
+    // only. The sweep stops the light ball on the ledge while the heavy one falls on past its end, which opens the
+    // joint. The pass closed it mostly by moving the light ball, into the ledge, and the second sweep put the ball
+    // back: the joint stayed open, by more each step. Held where the sweep left it, the light ball is not moved by a
+    // second pass; the heavy one comes to it.
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    w.add(Body::fixed_box({0.5f, 0.05f, 1}, {0, 0, 0}));
+    const int light = w.add(Body::solid_sphere(0.1f, 1, {0, 0.5f, 0}));
+    const int heavy = w.add(Body::solid_sphere(0.2f, 1, {0.8f, 0.5f, 0}));
+    w.add_joint(Joint::ball(w.bodies, light, heavy, {0.4f, 0.5f, 0}));
+    w.bodies[static_cast<size_t>(light)].vel = w.bodies[static_cast<size_t>(heavy)].vel = {0, -20, 0};
+    Real worst = 0;
+    size_t stops = 0;
+    for (int step = 0; step < 8; ++step) {
+        w.step(kDemoDt);
+        worst = std::max(worst, gap(w, 0));
+        stops += w.stats().ccd_hits;
+    }
+    CHECK(stops > 0);           // (the sweep did stop it)
+    CHECK(worst < 1e-3f);       // (measured: under a micrometre; held by nothing, 0.14 m by the eighth step)
+}
+
+TEST(a_cone_past_its_limit_is_put_back_without_opening_its_joint) {
+    // A leg (thigh and shin, hinged at the knee) hung from a body by a hip kept within 0.3 rad of straight down, bent
+    // 0.5 rad. The cone's row turns the thigh back, which swings the hip's anchor open, and the tree closing the
+    // anchor turned the thigh back out: four passes left it inside its cone but the hip and knee open by 5 cm. With the
+    // cone in the tree's solve, both are met at once.
+    std::vector<Body> bodies;
+    bodies.push_back(Body::solid_box({0.22f, 0.32f, 0.12f}, 10, {0, 0, 0}));
+    const Vec3 hip{0.12f, -0.36f, 0}, knee = hip - Vec3{0, 0.52f, 0};
+    bodies.push_back(Body::solid_capsule(0.18f, 0.08f, 1, hip - Vec3{0, 0.26f, 0}));
+    bodies.push_back(Body::solid_capsule(0.17f, 0.08f, 1, knee - Vec3{0, 0.25f, 0}));
+    Joint ball = Joint::ball(bodies, 0, 1, hip);
+    ball.limit_cone(bodies, {0, -1, 0}, 0.3f);
+    std::vector<Joint> joints{ball, Joint::hinge(bodies, 1, 2, knee, {1, 0, 0})};
+    const Quat bend = Quat::from_axis_angle({0, 0, 1}, 0.5f);  // the whole leg, about the hip
+    for (size_t i = 1; i <= 2; ++i) {
+        bodies[i].pos = hip + rotate(bend, bodies[i].pos - hip);
+        bodies[i].q = bend;
+    }
+    CHECK(gap_between(bodies, joints[0]) < 1e-5f && gap_between(bodies, joints[1]) < 1e-5f);
+    solve_joint_positions(bodies, joints, SolverSettings{});
+    CHECK(joints[0].cone_tilt(bodies) < 0.3f + 1e-3f);
+    CHECK(gap_between(bodies, joints[0]) < 1e-4f);  // (measured: under a micrometre; with the cone left out, 51 mm)
+    CHECK(gap_between(bodies, joints[1]) < 1e-4f);
+}
+
+TEST(a_held_body_keeps_the_joints_to_the_world_of_what_comes_to_it) {
+    // A rod hung from the world at one end, a light ball joined to the other, swung down at 25 rad/s onto a ledge under
+    // the ball. The sweep stops the ball, and the pass held to it moves the rod: about its pivot, which it must keep.
+    // The ball is stopped on the straight line between its poses, which cuts inside the arc it was swinging on: held
+    // there, nearer the pivot than the rod reaches, its joint cannot close all the way. It should close as far as the
+    // rod reaches. (The loop solved by dropping a row, as before step 31, closed two directions exactly and left the
+    // third three times as open as it need be.)
+    World w;
+    w.gravity = {};
+    w.allow_sleep = false;
+    w.add(Body::fixed_box({0.2f, 0.05f, 1}, {1.05f, -0.4f, 0}));
+    const int rod = w.add(Body::solid_box({0.4f, 0.05f, 0.05f}, 10, {0.4f, 0, 0}));
+    const int ball = w.add(Body::solid_sphere(0.1f, 1, {0.9f, 0, 0}));
+    w.add_joint(Joint::ball(w.bodies, -1, rod, {0, 0, 0}));
+    w.add_joint(Joint::ball(w.bodies, rod, ball, {0.8f, 0, 0}));
+    w.bodies[static_cast<size_t>(rod)].w = {0, 0, -25};
+    w.bodies[static_cast<size_t>(rod)].vel = {0, -10, 0};
+    w.bodies[static_cast<size_t>(ball)].vel = {0, -22.5f, 0};
+    Real worst_pivot = 0, worst_excess = 0;
+    size_t stops = 0;
+    for (int step = 0; step < 6; ++step) {
+        w.step(kDemoDt);
+        stops += w.stats().ccd_hits;
+        worst_pivot = std::max(worst_pivot, gap(w, 0));
+        const Real reach = std::fabs(w.joints[1].world_anchor_b(w.bodies).length() - 0.8f);  // the least it can be open
+        worst_excess = std::max(worst_excess, gap(w, 1) - reach);
+    }
+    CHECK(stops > 0);
+    CHECK(worst_pivot < 1e-3f);   // (measured: under a micrometre)
+    CHECK(worst_excess < 5e-4f);  // (measured: under a micrometre; dropping a row, 15 mm)
 }

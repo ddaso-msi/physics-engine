@@ -157,8 +157,9 @@ public:
     void store();          // saves the accumulated impulses back into the joints
     // Position pass (rows built with for_velocity false): corrects the rows of joints that form trees, all of a
     // tree at once (step 26), each error limited to `max_linear` or `max_angular`. `taken[j]` is set for each
-    // joint j (an index into the span prepare() was given) whose rows that hold both ways were corrected, and
-    // `error[j]` to the largest error of that joint's tree (metres or radians).
+    // joint j (an index into the span prepare() was given) whose rows that hold both ways were corrected: to 2 if
+    // a limit or cone of it, past its limit, was corrected with them (step 31), to 1 if not. And `error[j]` is set
+    // to the largest error of that joint's tree (metres or radians).
     void correct_trees(std::vector<Body>& bodies, Real max_linear, Real max_angular, std::vector<std::uint8_t>& taken,
                        std::vector<Real>& error);
 

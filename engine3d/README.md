@@ -1404,6 +1404,76 @@ velocities sagged every step was put back every step and passed; with the veloci
 Deliberate breakages: the exact solve back before the contacts, no exact velocity solve at all, the position pass back
 before the sweep, and no second sweep: each caught.
 
+## Step 31: what the sweep stops is held
+
+Step 30 put the 36 mm left on the ragdolls down to limits, contacts and anchors pulling against one another. Measured
+phase by phase (each joint's gap after the velocity solve and the move, after the first sweep, after the position pass
+and after the second sweep), it was mostly the sweeps. Every gap over 5 mm went the same way:
+
+| | start | velocity solve, move | first sweep | position pass | second sweep |
+|---|---|---|---|---|---|
+| a shoulder (step 157) | 21.4 mm | 21.1 | 37.4 | 0.0 | 35.9 |
+| an elbow (step 147) | 0.0 | 0.1 | 48.1 | 0.0 | 31.9 |
+
+The first sweep stops a limb at a step while what it hangs from carries on; the pass closes the joint mostly by moving
+the limb, the lighter part, into the step; the second sweep puts it back. And the next step the same. Two changes, and
+a third that a test of the first turned up:
+
+- **What the second sweep stops is held for one more pass.** When it stops anything, the joint position pass is run
+  again with those bodies held where it left them, as if fixed (their type made static and their inverse mass and
+  inertia zero, for that pass only), so that the rest of what is joined to them comes to them instead. Only the joints of
+  their islands; and those islands are swept once more after it. It is the second sweep's stops that are held, not the
+  first's: two balls fired at a wall are both stopped by the first, and held, their joint could not close at all.
+- **A limit or cone past its limit is corrected with its tree** in the position pass, as one more row that holds both
+  ways. What was left after the first change was a hip a few millimetres open for several steps with no sweep involved.
+  Each pass, its cone's row turned the thigh back inside the cone, which swung the hip's anchor open, and the tree then
+  closed the anchor by turning the thigh back out: four times a step, 6% nearer each time. (Only rows past their limit
+  are taken in, which a joint's six slots always hold: a ball joint's three rows and its cone; a hinge's five and one of
+  its limits, which cannot both be passed at once; a slider likewise. A limit the tree takes is not corrected again by
+  the row-by-row loop the same pass, which would double what one pass may move it.)
+- **A loop's cut rows are solved by least squares.** A body held by the first change can sit where the rows of two
+  joints, each fixed at its other end, cannot both be met: a ball swung on a rod about a pivot is stopped on the straight
+  line between its poses, inside the arc, nearer the pivot than the rod reaches. The rod (pivoted to the world, joined to
+  a body now fixed) is a loop through the world, and its cut rows, one too many, were solved by dropping whichever came
+  last in order: the others met exactly, the dropped one left three times as open as it need have been (15 mm, where
+  5 mm is as close as the rod reaches). Solving N lambda = W need, N = W W over the rows kept, leaves it 5 mm. Where the
+  rows can all be met (as at velocity level they always can) the answer is the same as before.
+
+Each of the first two alone does little; together:
+
+| demo ragdolls, 4 s | worst joint gap | joint-steps over 1 mm | over 5 mm |
+|---|---|---|---|
+| step 30 | 35.9 mm | 81 | 34 |
+| holding alone | 13.7 mm | 74 | 11 |
+| limits in the trees alone | 35.9 mm | 35 | 32 |
+| both | 0.15 mm | 0 | 0 |
+
+At 8 s, 10 of the ragdoll scene's bodies are still awake rather than 20. Every other joint scene in the demo is unchanged
+to the last digit. Cost, in the chains benchmark: the extra pass within the noise (it runs only on steps the second
+sweep stops something, and only for those islands); the last sweep 0.035 ms a step at 2000 links, 1%, and nothing
+measurable at 1000.
+
+Two things found and not fixed:
+
+- **A light body joined to a heavy one can be dragged into a fixed body.** The exact joint solve has the last word over
+  the contacts (step 30), and the sweep lets a body already touching go a quarter of its inscribed radius further in a
+  step. A 4 g ball on a 10 cm ledge, joined to a 34 g one falling past the ledge's end, sank half way in at 15 to 25 m/s
+  before it slid off the end; at 30 m/s it went through. Steps 29 and 30 do the same. Contacts would have to be part of
+  the exact solve.
+- **The demo's plank bridge (scene 6) opens 35 mm.** Straight and pinned at both ends, it cannot sag under the crate
+  without stretching, like the rope bridge before step 28. The scene is left as it is.
+
+Tests (3, 298 in total, and one tightened): a light ball stopped on a ledge while the heavy one joined to it falls past
+the end keeps its joint closed (held by nothing, 0.14 m open by the eighth step); a leg bent 0.2 rad past its hip's cone
+is put back inside it without opening the hip or knee (with the cone left to the row loop, 51 mm); a rod pivoted to the
+world swinging a ball onto a ledge keeps its pivot closed and its tip as closed as the rod can reach. And the jointed pair
+fired at a wall must now be left closed, not within 0.4 m (measured: under a micrometre; 0.25 m in step 30). Deliberate
+breakages: no held pass; nothing held in it; the joints to fixed bodies left out of it; the first sweep's stops held as
+well as the second's; no limits in the trees; a limit the tree took corrected again by the row loop; limits at (not past)
+their limit taken in; the loops back to dropping rows: each caught. Not caught: no sweep after the held pass (no case
+found where the pass moves a body far enough to need it) and that sweep over every body rather than the held islands'
+(time only).
+
 ## Planned next
 
 To be decided.

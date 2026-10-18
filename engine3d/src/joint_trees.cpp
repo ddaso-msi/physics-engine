@@ -97,6 +97,8 @@ void apply_impulse(JointRow& r, Real lambda) {
 
 // A rigid row that holds both ways: what the trees solve.
 bool two_way(const JointRow& r) { return r.lower == -kInf && r.upper == kInf && r.softness == 0 && r.mass > 0; }
+// A one-sided row (a limit, the cone) past its limit, as the position pass builds it: an error below zero.
+bool past_limit(const JointRow& r) { return r.lower == 0 && r.upper == kInf && r.error < 0 && r.softness == 0 && r.mass > 0; }
 
 }  // namespace
 
@@ -130,8 +132,13 @@ int JointTrees::add_node(int size, Body* body) {
 }
 
 void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointRow>& rows, const std::vector<int>& first,
-                       std::vector<std::uint8_t>* taken) {
+                       std::vector<std::uint8_t>* taken, bool violated) {
     if (taken) taken->assign(first.empty() ? 0 : first.size() - 1, 0);
+    // A joint taken in is marked 1, or 2 if one of the rows taken was a limit past its limit.
+    auto mark = [&](int joint, int row) {
+        std::uint8_t& t = (*taken)[static_cast<size_t>(joint)];
+        t = std::max(t, static_cast<std::uint8_t>(past_limit(rows[static_cast<size_t>(row)]) ? 2 : 1));
+    };
     used_ = 0;
     steps_.clear();
     data_.clear();
@@ -167,7 +174,7 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
     for (size_t k = 0; k + 1 < first.size(); ++k) {
         int chosen[6], m = 0;
         for (int r = first[k]; r < first[k + 1]; ++r)
-            if (two_way(rows[static_cast<size_t>(r)]) && m < 6) chosen[m++] = r;
+            if ((two_way(rows[static_cast<size_t>(r)]) || (violated && past_limit(rows[static_cast<size_t>(r)]))) && m < 6) chosen[m++] = r;
         if (m == 0) continue;
         const JointRow& r0 = rows[static_cast<size_t>(first[k])];
         const int side[2] = {body_index(r0.a), body_index(r0.b)};
@@ -309,7 +316,8 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
         ++trees_;
         if (taken)
             for (const int i : post)
-                if (!nodes_[static_cast<size_t>(i)].body) (*taken)[static_cast<size_t>(nodes_[static_cast<size_t>(i)].joint)] = 1;
+                if (const Node& node = nodes_[static_cast<size_t>(i)]; !node.body)
+                    for (int r = 0; r < node.size; ++r) mark(node.joint, node.rows[r]);
         // Packed for solving, in the same order.
         step_of_.resize(static_cast<size_t>(n));
         for (size_t k = 0; k < post.size(); ++k) step_of_[static_cast<size_t>(post[k])] = static_cast<int>(steps_.size() + k);
@@ -447,7 +455,8 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
         }
         const int count = loop.size;
         loop.L.assign(static_cast<size_t>(count * count), 0.0);
-        std::vector<double> W(static_cast<size_t>(count * count));
+        std::vector<double>& W = loop.W;
+        W.assign(static_cast<size_t>(count * count), 0.0);
         for (int j = 0; j < count; ++j) {
             const Scalar* column = response_.data() + loop.response + loop.length * static_cast<size_t>(j);
             for (int i = 0; i < count; ++i) {
@@ -458,9 +467,13 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
                 W[static_cast<size_t>(i * count + j)] = sum;
             }
         }
-        // Cholesky, dropping any row whose pivot vanishes: that row is implied, to first order, by the rows before it
-        // and the tree's (a straight chain fixed at both ends cannot be pulled along its length: its cut row along
-        // the chain is then such a row), and it is given no impulse. The others are still solved exactly.
+        for (int i = 0; i < count; ++i)  // (symmetric but for rounding)
+            for (int j = 0; j < i; ++j)
+                W[static_cast<size_t>(i * count + j)] = W[static_cast<size_t>(j * count + i)] =
+                    0.5 * (W[static_cast<size_t>(i * count + j)] + W[static_cast<size_t>(j * count + i)]);
+        // Cholesky of W, dropping any row whose pivot vanishes: that row is implied, to first order, by the rows
+        // before it and the tree's (a straight chain fixed at both ends cannot be pulled along its length: its cut
+        // row along the chain is then such a row), and it is given no impulse.
         double scale = 0;
         for (int i = 0; i < count; ++i) scale = std::max(scale, W[static_cast<size_t>(i * count + i)]);
         for (int c = 0; c < count; ++c) {
@@ -473,7 +486,37 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
             }
             loop.L[static_cast<size_t>(c * count + c)] = std::sqrt(d);
             for (int i = c + 1; i < count; ++i) {
-                double e = 0.5 * (W[static_cast<size_t>(i * count + c)] + W[static_cast<size_t>(c * count + i)]);
+                double e = W[static_cast<size_t>(i * count + c)];
+                for (int k = 0; k < c; ++k) e -= loop.L[static_cast<size_t>(i * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
+                loop.L[static_cast<size_t>(i * count + c)] = e / loop.L[static_cast<size_t>(c * count + c)];
+            }
+        }
+        // That was only to find the rows to drop. What is solved is N lambda = W need over the rows kept, N = W W
+        // (taking W's rows and columns of those): lambda that brings the cut rows as near as they can come to what
+        // they need, by least squares (step 31). When they can all have it (as for speeds they always can) that is
+        // the same lambda as W lambda = need; when they cannot (positions where no pose meets them all: a body held
+        // where the rows of two joints, both fixed at their other ends, put it at two different places) solving
+        // W lambda = need over the rows kept met those exactly and left whatever followed for the dropped one, which
+        // could be much more than all of them had needed: nearly three times as far apart as a pose could bring them.
+        std::vector<double> N(static_cast<size_t>(count * count), 0.0);
+        for (int i = 0; i < count; ++i)
+            for (int j = 0; j < count; ++j) {
+                if (loop.dropped[i] || loop.dropped[j]) continue;
+                double sum = 0;
+                for (int k = 0; k < count; ++k) sum += W[static_cast<size_t>(i * count + k)] * W[static_cast<size_t>(k * count + j)];
+                N[static_cast<size_t>(i * count + j)] = sum;
+            }
+        loop.L.assign(static_cast<size_t>(count * count), 0.0);
+        for (int c = 0; c < count; ++c) {
+            if (loop.dropped[c]) {
+                loop.L[static_cast<size_t>(c * count + c)] = 1;
+                continue;
+            }
+            double d = N[static_cast<size_t>(c * count + c)];
+            for (int k = 0; k < c; ++k) d -= loop.L[static_cast<size_t>(c * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
+            loop.L[static_cast<size_t>(c * count + c)] = std::sqrt(std::max(d, 1e-300));
+            for (int i = c + 1; i < count; ++i) {
+                double e = N[static_cast<size_t>(i * count + c)];
                 for (int k = 0; k < c; ++k) e -= loop.L[static_cast<size_t>(i * count + k)] * loop.L[static_cast<size_t>(c * count + k)];
                 loop.L[static_cast<size_t>(i * count + c)] = e / loop.L[static_cast<size_t>(c * count + c)];
             }
@@ -481,7 +524,7 @@ void JointTrees::build(const std::vector<Body>& bodies, const std::vector<JointR
     }
     if (taken)
         for (const Loop& loop : loops_)
-            for (int i = 0; i < loop.size; ++i) (*taken)[static_cast<size_t>(loop.joint[i])] = 1;
+            for (int i = 0; i < loop.size; ++i) mark(loop.joint[i], loop.rows[i]);
 }
 
 namespace {
@@ -569,7 +612,14 @@ void JointTrees::close_loops(std::vector<JointRow>& rows, bool positions, Real m
                 lambda[i] = -static_cast<double>(row.velocity() + row.bias);
             }
         }
-        for (int i = 0; i < n; ++i) {  // W lambda = need, by L L^T (a dropped row gets none)
+        double need[kMaxCutRows];
+        std::copy(lambda, lambda + n, need);
+        for (int i = 0; i < n; ++i) {  // N lambda = W need, by L L^T (a dropped row gets none)
+            lambda[i] = 0;
+            if (!loop.dropped[i])
+                for (int k = 0; k < n; ++k) lambda[i] += loop.W[static_cast<size_t>(i * n + k)] * need[k];
+        }
+        for (int i = 0; i < n; ++i) {
             if (loop.dropped[i]) {
                 lambda[i] = 0;
                 continue;

@@ -207,6 +207,43 @@ void World::step(Real dt) {
         const size_t swept = stats_.ccd_swept;
         continuous_collision();
         stats_.ccd_swept = swept;  // (the same bodies, counted once)
+        // What the second sweep stopped, it stopped short of a wall the pass had pulled it into, and the joints
+        // it pulled on are open again. (A ragdoll's arm stopped by a step: the pass closed its shoulder mostly by
+        // moving the arm, the lighter part, into the step, and the sweep put the arm back. Up to 4 cm open, a few
+        // times a run, and much of the time again the next step.) So the pass is run once more with those bodies
+        // held where the sweep left them, as if fixed: the rest of what is joined to them comes to them instead.
+        // Only for the joints of their islands; the rest have had their pass. Then swept again, for what that
+        // moved. (Two balls fired at a wall are both stopped by the first sweep, the reason not to hold what that
+        // one stops: the pair's joint would stay as open as the sweep left it.)
+        if (std::find(stopped_.begin(), stopped_.end(), 1) != stopped_.end()) {
+            held_.clear();
+            island_held_.assign(n, 0);
+            for (size_t i = 0; i < n; ++i)
+                if (stopped_[i]) {
+                    Body& b = bodies[i];
+                    held_.push_back({i, b.inv_mass, b.inv_inertia_body});
+                    b.type = BodyType::Static;
+                    b.inv_mass = 0;
+                    b.inv_inertia_body = Mat3::diagonal(0, 0, 0);
+                    island_held_[static_cast<size_t>(islands.find(static_cast<int>(i)))] = 1;
+                }
+            auto in_held_island = [&](int body) {
+                return body >= 0 && island_held_[static_cast<size_t>(islands.find(body))] != 0;
+            };
+            held_joints_.clear();
+            for (const Joint& j : joints)  // (copies: the pass only moves bodies)
+                if (in_held_island(j.a) || in_held_island(j.b)) held_joints_.push_back(j);
+            solve_joint_positions(bodies, held_joints_, solver);
+            for (const Held& h : held_) {
+                Body& b = bodies[h.index];
+                b.type = BodyType::Dynamic;
+                b.inv_mass = h.inv_mass;
+                b.inv_inertia_body = h.inv_inertia_body;
+            }
+            for (size_t i = 0; i < n; ++i) island_held_[i] = in_held_island(static_cast<int>(i));  // (now per body)
+            continuous_collision(&island_held_);
+            stats_.ccd_swept = swept;
+        }
         double again_ms = 0;
         lap(again_ms);
         stats_.ms_sweep += again_ms;
@@ -258,11 +295,12 @@ void World::step(Real dt) {
 // while all of it passes through. And holding the pose without touching the velocity is not enough: when
 // the one contact point the solver has is swinging AWAY from the wall (a long body spinning hard), the solver
 // does nothing, and the body crept in a quarter radius per step until it was through.
-void World::continuous_collision() {
+void World::continuous_collision(const std::vector<std::uint8_t>* only) {
     const size_t n = bodies.size();
+    stopped_.assign(n, 0);
     for (size_t i = 0; i < n; ++i) {
         Body& body = bodies[i];
-        if (!body.is_active()) continue;
+        if (!body.is_active() || (only && !(*only)[i])) continue;
         const Vec3 p0 = prev_pos_[i], p1 = body.pos;
         const Quat q0 = prev_q_[i], q1 = body.q;
         const Real radius = body.inscribed_radius(), reach = body.bounding_radius();
@@ -342,6 +380,7 @@ void World::continuous_collision() {
             body.pos = p0 + (p1 - p0) * earliest;
             body.q = blend(q0, q1, earliest);
             ++stats_.ccd_hits;
+            stopped_[i] = 1;
             if (held) {
                 // Held at its cap: it is being driven into the wall and the contact solver did nothing
                 // about it this step, or it would not be here. Treat it as the impact it is.
